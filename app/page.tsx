@@ -1832,7 +1832,8 @@ export default function Home() {
       const storeUrl = getStoreWhatsAppUrl(data, STORE_WHATSAPP_NUMBER);
       setStoreWhatsAppUrl(storeUrl);
       if (!whatsappSent) {
-        window.open(storeUrl, "_blank", "noopener,noreferrer");
+        // Navega na mesma aba: popups abertos após um await costumam ser bloqueados.
+        window.location.assign(storeUrl);
       }
 
       setOrderConfirmOpen(false);

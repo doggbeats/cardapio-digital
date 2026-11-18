@@ -1,6 +1,7 @@
 import type { SaleOrder } from "./database.types";
 import {
   formatStoreOrderMessage,
+  STORE_WHATSAPP_NUMBER,
   type WhatsAppNotificationResult,
 } from "./order-summary";
 
@@ -16,9 +17,9 @@ export async function notifyStoreOnWhatsApp(
 ): Promise<WhatsAppNotificationResult> {
   const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
   const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
-  const storePhone = process.env.WHATSAPP_STORE_PHONE_NUMBER;
+  const storePhone = process.env.WHATSAPP_STORE_PHONE_NUMBER || STORE_WHATSAPP_NUMBER;
 
-  if (!accessToken || !phoneNumberId || !storePhone) return "not_configured";
+  if (!accessToken || !phoneNumberId) return "not_configured";
 
   const apiVersion = process.env.WHATSAPP_API_VERSION || "v23.0";
   const recipient = storePhone.replace(/\D/g, "");
