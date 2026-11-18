@@ -1,7 +1,7 @@
 import type { OrderItem, SaleOrder } from "./database.types";
 
-/** Número da loja em E.164: 55 + DDD 61 + 99289-0326. */
-export const STORE_WHATSAPP_NUMBER = "5561992890326";
+/** Número da loja em E.164: 55 + DDD 61 + 98149-4548. */
+export const STORE_WHATSAPP_NUMBER = "5561981494548";
 
 export type WhatsAppNotificationResult = "sent" | "failed" | "not_configured";
 
