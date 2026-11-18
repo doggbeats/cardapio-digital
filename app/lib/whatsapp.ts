@@ -24,6 +24,8 @@ export async function notifyStoreOnWhatsApp(
   const apiVersion = process.env.WHATSAPP_API_VERSION || "v23.0";
   const recipient = storePhone.replace(/\D/g, "");
   if (!recipient) return "failed";
+  // A Meta recomenda enviar o destinatário em E.164 com "+".
+  const to = `+${recipient}`;
 
   try {
     const response = await fetch(
@@ -36,7 +38,7 @@ export async function notifyStoreOnWhatsApp(
         },
         body: JSON.stringify({
           messaging_product: "whatsapp",
-          to: recipient,
+          to,
           type: "text",
           text: { body: formatStoreOrderMessage(order) },
         }),
