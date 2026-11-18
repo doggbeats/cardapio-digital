@@ -20,6 +20,10 @@ for (const [key, value] of Object.entries(parsed ?? {})) {
   }
 }
 
+// Identifica o deploy atual para que abas abertas recarreguem e não usem
+// código antigo (por exemplo, com o número de WhatsApp anterior).
+process.env.NEXT_PUBLIC_APP_VERSION = process.env.VERCEL_GIT_COMMIT_SHA || "dev";
+
 const nextConfig: NextConfig = {
   /* config options here */
   experimental: {

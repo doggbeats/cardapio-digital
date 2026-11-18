@@ -816,6 +816,34 @@ export default function Home() {
     activeTabRef.current = activeTab;
   }, [activeTab]);
 
+  // Abas abertas antes de um deploy podem continuar com o bundle antigo.
+  // Compara a versão em execução com a do servidor e recarrega uma vez.
+  useEffect(() => {
+    const clientVersion = process.env.NEXT_PUBLIC_APP_VERSION || "dev";
+    const reloadKey = "cardapio:version-reloaded";
+    let reloadedVersion: string | null = null;
+    try {
+      reloadedVersion = sessionStorage.getItem(reloadKey);
+    } catch {
+      // Armazenamento pode estar indisponível; seguimos sem a verificação.
+    }
+    if (reloadedVersion === clientVersion) return;
+
+    fetch("/api/version", { cache: "no-store" })
+      .then((response) => response.json())
+      .then((data: { version?: string }) => {
+        if (data.version && data.version !== clientVersion) {
+          try {
+            sessionStorage.setItem(reloadKey, data.version);
+          } catch {
+            // Ignora falha de armazenamento.
+          }
+          window.location.reload();
+        }
+      })
+      .catch(() => {});
+  }, []);
+
   // O áudio só pode ser liberado após um gesto do usuário. Registramos o
   // desbloqueio no primeiro clique/toque/tecla para que o alarme toque depois.
   useEffect(() => {
