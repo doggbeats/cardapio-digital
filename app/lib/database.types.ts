@@ -47,18 +47,33 @@ export type Database = {
           name: string;
           price_cents: number;
           available: boolean;
+          description: string;
+          category: string;
+          image: string;
+          old_price_cents: number | null;
+          badge: string | null;
         };
         Insert: {
           id: number;
           name: string;
           price_cents: number;
           available?: boolean;
+          description?: string;
+          category?: string;
+          image?: string;
+          old_price_cents?: number | null;
+          badge?: string | null;
         };
         Update: {
           id?: number;
           name?: string;
           price_cents?: number;
           available?: boolean;
+          description?: string;
+          category?: string;
+          image?: string;
+          old_price_cents?: number | null;
+          badge?: string | null;
         };
         Relationships: [];
       };

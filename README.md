@@ -20,11 +20,15 @@ Open [http://localhost:3000](http://localhost:3000) with your browser to see the
 
 Copy `.env.example` to `.env.local` and fill in the project URL and public anon key from your Supabase project settings. Never put a secret or service-role key in a `NEXT_PUBLIC_*` variable. Restart the development server after changing the file.
 
-Run `supabase/schema.sql` in the Supabase SQL Editor before placing orders. It creates the menu catalog, order table, row-level security policies, and the `place_order` function. New accounts may need to confirm their email, depending on the project's authentication settings.
+Run `supabase/setup.sql` once in the Supabase SQL Editor before placing orders. It creates the menu catalog (with description, category, image and promotion fields), the order table, row-level security policies, and the `place_order` function, then seeds the 16 initial products. The script is safe to run again. `supabase/schema.sql`, `supabase/addons_migration.sql` and `supabase/products_migration.sql` are kept as the individual building blocks. New accounts may need to confirm their email, depending on the project's authentication settings.
 
 The profile page supports changing the delivery address and password, and viewing past orders. The sales panel is limited to accounts whose trusted `app_metadata` contains `role: "admin"`. Assign this role through a trusted Supabase admin workflow, never from browser code or user-editable metadata. Admins can open a prefilled order summary for the customer's WhatsApp number from the sales panel.
 
-To sign in to the panel, click the shield icon next to the cart in the header and enter the e-mail and password of an admin account. First create the account normally, then grant the `admin` role in one of two ways: run `supabase/admin.sql` in the Supabase SQL Editor, or set `SUPABASE_SERVICE_ROLE_KEY` and use the Supabase Admin API to update the account's `app_metadata` (as done for `paulo.analise90@gmail.com`). Sign in again so the token picks up the new role. Signing in as admin replaces the current browser session. Never expose the service-role key to the browser.
+To sign in to the panel, click the shield icon next to the cart in the header and enter the e-mail and password of an admin account. First create the account normally, then grant the `admin` role in one of two ways: run `supabase/admin.sql` in the Supabase SQL Editor, or set `SUPABASE_SERVICE_ROLE_KEY` and use the Supabase Admin API to update the account's `app_metadata`. Sign in again so the token picks up the new role. Signing in as admin replaces the current browser session. Never expose the service-role key to the browser.
+
+## Product management
+
+Inside the admin panel, switch from **Vendas** to **Produtos** to create, edit, delete and enable/disable products. The form includes name, price, promotional price, category, description, image, badge and availability. Images can be uploaded from the device (JPG, PNG, WEBP or GIF, up to 5 MB) or provided by URL; uploads go through `/api/admin/products/upload` to the public `product-images` Supabase Storage bucket created by `supabase/storage.sql` (also included in `supabase/setup.sql`). Changes are saved in `menu_catalog` through server-only Route Handlers that verify the admin role and use the service-role key; the public menu reloads the catalog on startup so every customer sees the updated products.
 
 ## Placing an order
 
@@ -33,6 +37,10 @@ The customer reviews the cart and taps **Fazer pedido**. A confirmation sheet sh
 ## Order webhook
 
 After an order is confirmed, the app POSTs it to `ORDER_WEBHOOK_URL` when that variable is set. The body is `{ "event": "order.created", "order": { ... } }` and, if `ORDER_WEBHOOK_SECRET` is set, a `X-Webhook-Secret` header is included so the receiver can validate the request. A webhook failure does not undo the order. Both variables are server-side only (no `NEXT_PUBLIC_` prefix).
+
+## Cookie consent
+
+A consent banner appears on the first visit with **Aceitar todos**, **Recusar** and **Personalizar** options. The choice is stored in the `cardapio_cookie_consent` cookie (180 days, `SameSite=Lax`) and can be changed at any time through **Preferências de cookies** in the footer. Only necessary cookies are set before consent; optional analytics and marketing categories are recorded in the preference but no third-party script is loaded.
 
 ## Encrypted environment variables
 

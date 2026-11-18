@@ -13,6 +13,7 @@ import {
 } from "react";
 import { type OrderItem, type OrderStatus, type SaleOrder } from "./lib/database.types";
 import { getSupabaseClient } from "./lib/supabase";
+import CookieConsent from "./components/CookieConsent";
 
 type Category =
   | "Todos"
@@ -26,6 +27,19 @@ type Tab = "Início" | "Promoções" | "Pedidos" | "Perfil" | "Admin";
 type ProductCategory = Exclude<Category, "Todos" | "Favoritos">;
 type AuthMode = "login" | "register";
 type ProfileAction = "password" | "address" | null;
+type AdminSection = "sales" | "products";
+
+type AdminProduct = {
+  id: number;
+  name: string;
+  price_cents: number;
+  description: string;
+  category: ProductCategory;
+  image: string;
+  old_price_cents: number | null;
+  badge: string | null;
+  available: boolean;
+};
 type CartLine = {
   productId: number;
   specialSauce: boolean;
@@ -57,7 +71,7 @@ type Product = {
   badge?: string;
 };
 
-const products: Product[] = [
+const seedProducts: Product[] = [
   {
     id: 1,
     name: "Clássico da Casa",
@@ -208,6 +222,46 @@ const products: Product[] = [
       "https://images.pexels.com/photos/376464/pexels-photo-376464.jpeg?auto=compress&cs=tinysrgb&w=800",
   },
 ];
+
+function adminProductToProduct(item: AdminProduct): Product {
+  return {
+    id: item.id,
+    name: item.name,
+    description: item.description,
+    price: item.price_cents / 100,
+    oldPrice: item.old_price_cents ? item.old_price_cents / 100 : undefined,
+    category: item.category,
+    image: item.image,
+    badge: item.badge ?? undefined,
+  };
+}
+
+const emptyProductForm = {
+  name: "",
+  price: "",
+  description: "",
+  category: "Burgers" as ProductCategory,
+  image: "",
+  oldPrice: "",
+  badge: "",
+  available: true,
+};
+
+const DEFAULT_PRODUCT_IMAGE =
+  "https://images.unsplash.com/photo-1546069901-ba9599a7e63c?auto=format&fit=crop&w=800&q=85";
+
+async function getAdminToken() {
+  const {
+    data: { session },
+  } = await getSupabaseClient().auth.getSession();
+  const token = session?.access_token;
+  if (!token) throw new Error("Sua sessão expirou. Entre novamente no painel.");
+  return token;
+}
+
+function priceToCents(value: string) {
+  return Math.round(Number(value.replace(",", ".")) * 100);
+}
 
 const categories: Category[] = [
   "Todos",
@@ -369,6 +423,14 @@ function Icon({
         <svg {...common}>
           <path d="M12 3 5 6v6c0 4.4 3 8 7 9 4-1 7-4.6 7-9V6l-7-3Z" />
           <path d="m9.5 12 1.8 1.8 3.4-3.6" />
+        </svg>
+      );
+    case "image":
+      return (
+        <svg {...common}>
+          <rect x="3" y="4" width="18" height="16" rx="2" />
+          <circle cx="8.5" cy="9.5" r="1.5" />
+          <path d="m4 17 4.5-4.5 3.5 3.5 2.5-2.5L20 19" />
         </svg>
       );
     case "eye":
@@ -558,7 +620,7 @@ function useProfileFavorites(profileId: string) {
       storedFavorites
         .split(",")
         .map(Number)
-        .filter((id) => products.some((product) => product.id === id)),
+        .filter((id) => Number.isInteger(id) && id > 0),
     [storedFavorites],
   );
 }
@@ -586,6 +648,16 @@ function DeliveryLine({
 
 export default function Home() {
   const [activeTab, setActiveTab] = useState<Tab>("Início");
+  const [adminSection, setAdminSection] = useState<AdminSection>("sales");
+  const [products, setProducts] = useState<Product[]>(seedProducts);
+  const [adminProducts, setAdminProducts] = useState<AdminProduct[]>([]);
+  const [productsLoading, setProductsLoading] = useState(false);
+  const [productForm, setProductForm] = useState(emptyProductForm);
+  const [editingProductId, setEditingProductId] = useState<number | null>(null);
+  const [productSaving, setProductSaving] = useState(false);
+  const [imageUploading, setImageUploading] = useState(false);
+  const [productError, setProductError] = useState<string | null>(null);
+  const [productMessage, setProductMessage] = useState<string | null>(null);
   const [activeCategory, setActiveCategory] = useState<Category>("Todos");
   const [search, setSearch] = useState("");
   const [cart, setCart] = useState<Cart>({});
@@ -673,6 +745,28 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    let isMounted = true;
+
+    void Promise.resolve()
+      .then(() =>
+        getSupabaseClient()
+          .from("menu_catalog")
+          .select("*")
+          .order("id", { ascending: true }),
+      )
+      .then(({ data, error }) => {
+        if (!isMounted || error || !data || data.length === 0) return;
+        const items = data as AdminProduct[];
+        setAdminProducts(items);
+        setProducts(items.map(adminProductToProduct));
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
     if (activeTab !== "Admin" || !isAdmin) return;
     let isMounted = true;
 
@@ -750,7 +844,7 @@ export default function Home() {
         const matchesPromotion = !isPromotions || product.oldPrice;
         return matchesCategory && matchesSearch && matchesPromotion;
       }),
-    [activeCategory, favorites, isPromotions, search],
+    [activeCategory, favorites, isPromotions, products, search],
   );
   const cartCount = Object.values(cart).reduce((total, line) => total + line.quantity, 0);
   const filteredSales = useMemo(() => {
@@ -834,6 +928,7 @@ export default function Home() {
     setSalesLoading(true);
     setTodayRange(getTodayRange());
     setSalesRefresh((refresh) => refresh + 1);
+    setAdminSection("sales");
     setActiveTab("Admin");
   }
 
@@ -879,6 +974,211 @@ export default function Home() {
     setSalesLoading(true);
     setTodayRange(getTodayRange());
     setSalesRefresh((refresh) => refresh + 1);
+  }
+
+  const loadAdminProducts = useCallback(async () => {
+    setProductsLoading(true);
+    setProductError(null);
+    try {
+      const token = await getAdminToken();
+      const response = await fetch("/api/admin/products", {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const payload = (await response.json().catch(() => null)) as
+        | { products?: AdminProduct[]; error?: string }
+        | null;
+      if (!response.ok) {
+        throw new Error(payload?.error ?? "Não foi possível carregar os produtos.");
+      }
+      const items = payload?.products ?? [];
+      setAdminProducts(items);
+      setProducts(items.map(adminProductToProduct));
+    } catch (error) {
+      setProductError(
+        error instanceof Error ? error.message : "Não foi possível carregar os produtos.",
+      );
+    } finally {
+      setProductsLoading(false);
+    }
+  }, []);
+
+  function openAdminProducts() {
+    setAdminSection("products");
+    void loadAdminProducts();
+  }
+
+  function startNewProduct() {
+    setEditingProductId(null);
+    setProductForm(emptyProductForm);
+    setProductError(null);
+    setProductMessage(null);
+  }
+
+  function startEditProduct(item: AdminProduct) {
+    setEditingProductId(item.id);
+    setProductForm({
+      name: item.name,
+      price: (item.price_cents / 100).toFixed(2),
+      description: item.description,
+      category: item.category,
+      image: item.image,
+      oldPrice: item.old_price_cents ? (item.old_price_cents / 100).toFixed(2) : "",
+      badge: item.badge ?? "",
+      available: item.available,
+    });
+    setProductError(null);
+    setProductMessage(null);
+  }
+
+  async function saveProduct(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setProductError(null);
+    setProductMessage(null);
+
+    const name = productForm.name.trim();
+    const priceCents = priceToCents(productForm.price);
+    const oldPriceCents = productForm.oldPrice.trim() ? priceToCents(productForm.oldPrice) : null;
+    if (!name) {
+      setProductError("Informe o nome do produto.");
+      return;
+    }
+    if (!Number.isFinite(priceCents) || priceCents <= 0) {
+      setProductError("Informe um preço válido.");
+      return;
+    }
+    if (oldPriceCents !== null && (!Number.isFinite(oldPriceCents) || oldPriceCents <= priceCents)) {
+      setProductError("O preço promocional deve ser menor que o preço normal.");
+      return;
+    }
+
+    setProductSaving(true);
+    try {
+      const token = await getAdminToken();
+      const isEdit = editingProductId !== null;
+      const response = await fetch(
+        isEdit ? `/api/admin/products/${editingProductId}` : "/api/admin/products",
+        {
+          method: isEdit ? "PUT" : "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            name,
+            price_cents: priceCents,
+            description: productForm.description.trim(),
+            category: productForm.category,
+            image: productForm.image.trim() || DEFAULT_PRODUCT_IMAGE,
+            old_price_cents: oldPriceCents,
+            badge: productForm.badge.trim() || null,
+            available: productForm.available,
+          }),
+        },
+      );
+      const payload = (await response.json().catch(() => null)) as
+        | { error?: string }
+        | null;
+      if (!response.ok) {
+        throw new Error(payload?.error ?? "Não foi possível salvar o produto.");
+      }
+      await loadAdminProducts();
+      setProductMessage(isEdit ? "Produto atualizado com sucesso." : "Produto criado com sucesso.");
+      startNewProduct();
+    } catch (error) {
+      setProductError(
+        error instanceof Error ? error.message : "Não foi possível salvar o produto.",
+      );
+    } finally {
+      setProductSaving(false);
+    }
+  }
+
+  async function uploadProductImage(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+
+    setProductError(null);
+    setImageUploading(true);
+    try {
+      const token = await getAdminToken();
+      const body = new FormData();
+      body.append("file", file);
+      const response = await fetch("/api/admin/products/upload", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+        body,
+      });
+      const payload = (await response.json().catch(() => null)) as
+        | { url?: string; error?: string }
+        | null;
+      if (!response.ok || !payload?.url) {
+        throw new Error(payload?.error ?? "Não foi possível enviar a imagem.");
+      }
+      setProductForm((current) => ({ ...current, image: payload.url as string }));
+      setProductMessage("Imagem enviada. Salve o produto para aplicar a alteração.");
+    } catch (error) {
+      setProductError(
+        error instanceof Error ? error.message : "Não foi possível enviar a imagem.",
+      );
+    } finally {
+      setImageUploading(false);
+    }
+  }
+
+  async function deleteProduct(id: number) {
+    if (!window.confirm("Excluir este produto do cardápio?")) return;
+    setProductError(null);
+    setProductMessage(null);
+    try {
+      const token = await getAdminToken();
+      const response = await fetch(`/api/admin/products/${id}`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+      if (!response.ok) throw new Error(payload?.error ?? "Não foi possível excluir o produto.");
+      if (editingProductId === id) startNewProduct();
+      await loadAdminProducts();
+      setProductMessage("Produto excluído.");
+    } catch (error) {
+      setProductError(
+        error instanceof Error ? error.message : "Não foi possível excluir o produto.",
+      );
+    }
+  }
+
+  async function toggleProductAvailable(item: AdminProduct) {
+    setProductError(null);
+    try {
+      const token = await getAdminToken();
+      const response = await fetch(`/api/admin/products/${item.id}`, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          name: item.name,
+          price_cents: item.price_cents,
+          description: item.description,
+          category: item.category,
+          image: item.image,
+          old_price_cents: item.old_price_cents,
+          badge: item.badge,
+          available: !item.available,
+        }),
+      });
+      const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+      if (!response.ok) {
+        throw new Error(payload?.error ?? "Não foi possível atualizar o produto.");
+      }
+      await loadAdminProducts();
+    } catch (error) {
+      setProductError(
+        error instanceof Error ? error.message : "Não foi possível atualizar o produto.",
+      );
+    }
   }
 
   async function saveProfileAddress(event: FormEvent<HTMLFormElement>) {
@@ -1541,17 +1841,9 @@ export default function Home() {
                 <div className="admin-page-heading">
                   <div>
                     <p className="eyebrow">GESTÃO</p>
-                    <h1>Vendas</h1>
+                    <h1>{adminSection === "sales" ? "Vendas" : "Produtos"}</h1>
                   </div>
                   <div className="admin-page-actions">
-                    <button
-                      className="admin-refresh"
-                      type="button"
-                      onClick={refreshSales}
-                      disabled={salesLoading}
-                    >
-                      {salesLoading ? "Atualizando..." : "Atualizar"}
-                    </button>
                     <button
                       className="admin-logout"
                       type="button"
@@ -1562,7 +1854,39 @@ export default function Home() {
                     </button>
                   </div>
                 </div>
-                {salesError && <p className="auth-feedback error" role="alert">{salesError}</p>}
+                <div className="admin-section-tabs" role="tablist" aria-label="Seções do painel">
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={adminSection === "sales"}
+                    className={adminSection === "sales" ? "active" : undefined}
+                    onClick={() => setAdminSection("sales")}
+                  >
+                    Vendas
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={adminSection === "products"}
+                    className={adminSection === "products" ? "active" : undefined}
+                    onClick={openAdminProducts}
+                  >
+                    Produtos
+                  </button>
+                </div>
+                {adminSection === "sales" && (
+                  <>
+                    <div className="admin-sales-actions">
+                      <button
+                        className="admin-refresh"
+                        type="button"
+                        onClick={refreshSales}
+                        disabled={salesLoading}
+                      >
+                        {salesLoading ? "Atualizando..." : "Atualizar vendas"}
+                      </button>
+                    </div>
+                    {salesError && <p className="auth-feedback error" role="alert">{salesError}</p>}
                 <div className="admin-metrics">
                   <article>
                     <span>Pedidos recebidos</span>
@@ -1680,6 +2004,251 @@ export default function Home() {
                     </div>
                   )}
                 </div>
+                  </>
+                )}
+                {adminSection === "products" && (
+                  <div className="admin-products-layout">
+                    <form
+                      className="admin-product-form"
+                      onSubmit={saveProduct}
+                      aria-busy={productSaving}
+                    >
+                      <div className="admin-product-form-head">
+                        <h2>{editingProductId !== null ? "Editar produto" : "Novo produto"}</h2>
+                        {editingProductId !== null && (
+                          <button
+                            className="admin-product-cancel"
+                            type="button"
+                            onClick={startNewProduct}
+                          >
+                            Cancelar edição
+                          </button>
+                        )}
+                      </div>
+                      {productError && (
+                        <p className="auth-feedback error" role="alert">{productError}</p>
+                      )}
+                      {productMessage && (
+                        <p className="auth-feedback success" role="status">{productMessage}</p>
+                      )}
+                      <label className="admin-product-field">
+                        <span>Nome</span>
+                        <input
+                          type="text"
+                          required
+                          value={productForm.name}
+                          onChange={(event) =>
+                            setProductForm({ ...productForm, name: event.target.value })
+                          }
+                          placeholder="Ex.: Clássico da Casa"
+                        />
+                      </label>
+                      <div className="admin-product-row">
+                        <label className="admin-product-field">
+                          <span>Preço (R$)</span>
+                          <input
+                            type="number"
+                            min="0"
+                            step="0.01"
+                            required
+                            value={productForm.price}
+                            onChange={(event) =>
+                              setProductForm({ ...productForm, price: event.target.value })
+                            }
+                            placeholder="32,90"
+                          />
+                        </label>
+                        <label className="admin-product-field">
+                          <span>Preço promocional (R$)</span>
+                          <input
+                            type="number"
+                            min="0"
+                            step="0.01"
+                            value={productForm.oldPrice}
+                            onChange={(event) =>
+                              setProductForm({ ...productForm, oldPrice: event.target.value })
+                            }
+                            placeholder="Deixe vazio se não houver"
+                          />
+                        </label>
+                      </div>
+                      <label className="admin-product-field">
+                        <span>Categoria</span>
+                        <select
+                          value={productForm.category}
+                          onChange={(event) =>
+                            setProductForm({
+                              ...productForm,
+                              category: event.target.value as ProductCategory,
+                            })
+                          }
+                        >
+                          {categories
+                            .filter((category) => category !== "Todos" && category !== "Favoritos")
+                            .map((category) => (
+                              <option value={category} key={category}>{category}</option>
+                            ))}
+                        </select>
+                      </label>
+                      <label className="admin-product-field">
+                        <span>Descrição</span>
+                        <textarea
+                          rows={3}
+                          value={productForm.description}
+                          onChange={(event) =>
+                            setProductForm({ ...productForm, description: event.target.value })
+                          }
+                          placeholder="Ingredientes e detalhes do produto"
+                        />
+                      </label>
+                      <div className="admin-product-field">
+                        <span>Imagem do produto</span>
+                        <div className="admin-image-upload">
+                          <div className="admin-image-preview">
+                            {productForm.image ? (
+                              <Image
+                                src={productForm.image}
+                                alt="Prévia do produto"
+                                fill
+                                unoptimized
+                                sizes="104px"
+                              />
+                            ) : (
+                              <Icon name="image" size={24} />
+                            )}
+                          </div>
+                          <div className="admin-image-controls">
+                            <label className="admin-image-file">
+                              <input
+                                type="file"
+                                accept="image/jpeg,image/png,image/webp,image/gif"
+                                disabled={imageUploading}
+                                onChange={(event) => void uploadProductImage(event)}
+                              />
+                              <span>{imageUploading ? "Enviando..." : "Escolher imagem"}</span>
+                            </label>
+                            {productForm.image && (
+                              <button
+                                className="admin-product-cancel"
+                                type="button"
+                                onClick={() =>
+                                  setProductForm((current) => ({ ...current, image: "" }))
+                                }
+                              >
+                                Remover imagem
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                        <input
+                          type="url"
+                          className="admin-image-url"
+                          value={productForm.image}
+                          onChange={(event) =>
+                            setProductForm({ ...productForm, image: event.target.value })
+                          }
+                          placeholder="Ou cole a URL de uma imagem"
+                        />
+                      </div>
+                      <label className="admin-product-field">
+                        <span>Selo (opcional)</span>
+                        <input
+                          type="text"
+                          value={productForm.badge}
+                          onChange={(event) =>
+                            setProductForm({ ...productForm, badge: event.target.value })
+                          }
+                          placeholder="Ex.: Mais pedido, Oferta"
+                        />
+                      </label>
+                      <label className="admin-product-check">
+                        <input
+                          type="checkbox"
+                          checked={productForm.available}
+                          onChange={(event) =>
+                            setProductForm({ ...productForm, available: event.target.checked })
+                          }
+                        />
+                        <span>Disponível no cardápio</span>
+                      </label>
+                      <button className="primary-button" type="submit" disabled={productSaving}>
+                        {productSaving
+                          ? "Salvando..."
+                          : editingProductId !== null
+                            ? "Salvar alterações"
+                            : "Adicionar produto"}
+                      </button>
+                    </form>
+
+                    <div className="admin-product-list">
+                      <div className="admin-product-list-head">
+                        <h2>Produtos cadastrados</h2>
+                        <button
+                          className="admin-refresh"
+                          type="button"
+                          onClick={() => void loadAdminProducts()}
+                          disabled={productsLoading}
+                        >
+                          {productsLoading ? "Carregando..." : "Atualizar"}
+                        </button>
+                      </div>
+                      {productsLoading ? (
+                        <p className="auth-loading">Carregando produtos...</p>
+                      ) : adminProducts.length > 0 ? (
+                        adminProducts.map((item) => (
+                          <article
+                            className={`admin-product-card${item.available ? "" : " unavailable"}`}
+                            key={item.id}
+                          >
+                            <div className="admin-product-thumb">
+                              <Image src={item.image} alt="" fill unoptimized sizes="72px" />
+                            </div>
+                            <div className="admin-product-info">
+                              <strong>{item.name}</strong>
+                              <span>{item.category}</span>
+                              <span className="admin-product-price">
+                                {formatPrice(item.price_cents / 100)}
+                                {item.old_price_cents && (
+                                  <s>{formatPrice(item.old_price_cents / 100)}</s>
+                                )}
+                              </span>
+                              {!item.available && <span className="admin-product-hidden">Oculto</span>}
+                            </div>
+                            <div className="admin-product-actions">
+                              <button
+                                type="button"
+                                onClick={() => void toggleProductAvailable(item)}
+                                disabled={productSaving}
+                              >
+                                {item.available ? "Desativar" : "Ativar"}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => startEditProduct(item)}
+                                disabled={productSaving}
+                              >
+                                Editar
+                              </button>
+                              <button
+                                type="button"
+                                className="danger"
+                                onClick={() => void deleteProduct(item.id)}
+                                disabled={productSaving}
+                              >
+                                Excluir
+                              </button>
+                            </div>
+                          </article>
+                        ))
+                      ) : (
+                        <div className="empty-state admin-empty-state">
+                          <h2>Nenhum produto cadastrado</h2>
+                          <p>Use o formulário ao lado para adicionar o primeiro produto.</p>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
               </>
             ) : (
               <div className="auth-page admin-login">
@@ -2232,6 +2801,17 @@ export default function Home() {
           </section>
         </div>
       )}
+
+      <footer className="site-footer">
+        <span>Brasa &amp; Pão · Cardápio digital</span>
+        <button
+          type="button"
+          onClick={() => window.dispatchEvent(new Event("cardapio:open-cookie-settings"))}
+        >
+          Preferências de cookies
+        </button>
+      </footer>
+      <CookieConsent />
     </div>
   );
 }
