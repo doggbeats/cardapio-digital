@@ -1454,7 +1454,8 @@ input:focus-visible {
   cursor: pointer;
 }
 
-.new-order-toast {
+.new-order-toast,
+.order-confirmation-toast {
   position: fixed;
   z-index: 40;
   right: max(20px, calc((100vw - 1120px) / 2));
@@ -3126,7 +3127,8 @@ input:focus-visible {
     left: 12px;
   }
 
-  .new-order-toast {
+  .new-order-toast,
+  .order-confirmation-toast {
     right: 12px;
     bottom: calc(118px + env(safe-area-inset-bottom));
     left: 12px;

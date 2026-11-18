@@ -765,6 +765,7 @@ export default function Home() {
   const [customerOrders, setCustomerOrders] = useState<SaleOrder[]>([]);
   const [storeWhatsAppUrl, setStoreWhatsAppUrl] = useState<string | null>(null);
   const [storeWhatsAppSent, setStoreWhatsAppSent] = useState(false);
+  const [orderConfirmation, setOrderConfirmation] = useState<SaleOrder | null>(null);
   const [newOrderAlert, setNewOrderAlert] = useState<SaleOrder | null>(null);
   const [newOrderCount, setNewOrderCount] = useState(0);
   const [notificationPermission, setNotificationPermission] = useState<
@@ -812,6 +813,7 @@ export default function Home() {
   const activeTabRef = useRef(activeTab);
   const seenOrderIdsRef = useRef<Set<number>>(new Set());
   const ordersSeededRef = useRef(false);
+  const whatsappRedirectRef = useRef<number | null>(null);
   useEffect(() => {
     activeTabRef.current = activeTab;
   }, [activeTab]);
@@ -1142,6 +1144,12 @@ export default function Home() {
     const timer = window.setTimeout(() => setNewOrderAlert(null), 12000);
     return () => window.clearTimeout(timer);
   }, [newOrderAlert]);
+
+  useEffect(() => {
+    if (!orderConfirmation) return;
+    const timer = window.setTimeout(() => setOrderConfirmation(null), 10000);
+    return () => window.clearTimeout(timer);
+  }, [orderConfirmation]);
 
   const isPromotions = activeTab === "Ofertas";
   const highlightedProducts = useMemo(
@@ -1813,6 +1821,13 @@ export default function Home() {
     setOrderConfirmOpen(true);
   }
 
+  function cancelWhatsappRedirect() {
+    if (whatsappRedirectRef.current !== null) {
+      window.clearTimeout(whatsappRedirectRef.current);
+      whatsappRedirectRef.current = null;
+    }
+  }
+
   async function placeOrder() {
     setCheckoutError(null);
     if (!authUser) {
@@ -1859,9 +1874,14 @@ export default function Home() {
       setStoreWhatsAppSent(whatsappSent);
       const storeUrl = getStoreWhatsAppUrl(data, STORE_WHATSAPP_NUMBER);
       setStoreWhatsAppUrl(storeUrl);
+      setOrderConfirmation(data);
+      cancelWhatsappRedirect();
       if (!whatsappSent) {
-        // Navega na mesma aba: popups abertos após um await costumam ser bloqueados.
-        window.location.assign(storeUrl);
+        // Mostra a confirmação antes de abrir o WhatsApp na mesma aba.
+        whatsappRedirectRef.current = window.setTimeout(() => {
+          whatsappRedirectRef.current = null;
+          window.location.assign(storeUrl);
+        }, 1800);
       }
 
       setOrderConfirmOpen(false);
@@ -3693,6 +3713,38 @@ export default function Home() {
               <span>{formatPrice(subtotal + deliveryFee)}</span>
             </button>
           </section>
+        </div>
+      )}
+
+      {orderConfirmation && (
+        <div className="order-confirmation-toast" role="status" aria-live="polite">
+          <span className="new-order-toast-icon"><Icon name="check" size={20} /></span>
+          <div className="new-order-toast-copy">
+            <strong>Pedido #{String(orderConfirmation.id).padStart(4, "0")} confirmado!</strong>
+            <span>Acompanhe em Pedidos ou envie o resumo no WhatsApp.</span>
+          </div>
+          <button
+            className="new-order-toast-view"
+            type="button"
+            onClick={() => {
+              cancelWhatsappRedirect();
+              setOrderConfirmation(null);
+              setActiveTab("Pedidos");
+            }}
+          >
+            Ver pedidos
+          </button>
+          <button
+            className="new-order-toast-close"
+            type="button"
+            onClick={() => {
+              cancelWhatsappRedirect();
+              setOrderConfirmation(null);
+            }}
+            aria-label="Fechar confirmação do pedido"
+          >
+            <Icon name="close" size={16} />
+          </button>
         </div>
       )}
 
