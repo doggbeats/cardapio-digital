@@ -1,8 +1,34 @@
--- Adicionais e observação nos pedidos.
--- Execute este arquivo no SQL Editor do Supabase. Ele apenas substitui a função
--- place_order; não recria tabelas nem altera o cardápio.
--- O molho especial custa 300 centavos (R$ 3,00) por unidade do produto.
+﻿-- Migration: dynamic order add-ons (replaces the fixed special sauce).
+-- Safe to run more than once in the Supabase SQL Editor.
+-- If a "Could not find the table ... in the schema cache" error appears, run:
+-- notify pgrst, 'reload schema';
 
+-- Adicionais cadastrados no painel (molho especial, bacon, cheddar etc.).
+create table if not exists public.product_addons (
+  id bigint generated always as identity primary key,
+  name text not null unique check (length(trim(name)) between 1 and 40),
+  price_cents integer not null check (price_cents > 0),
+  available boolean not null default true,
+  created_at timestamptz not null default now()
+);
+
+insert into public.product_addons (name, price_cents)
+select seed.name, seed.price_cents
+from (values ('Molho especial', 300), ('Bacon crocante', 500), ('Cheddar extra', 450), ('Ovo caipira', 300)) as seed(name, price_cents)
+where not exists (select 1 from public.product_addons where name = seed.name);
+
+alter table public.product_addons enable row level security;
+
+grant select on public.product_addons to anon, authenticated;
+
+drop policy if exists "Add-ons are public" on public.product_addons;
+create policy "Add-ons are public"
+  on public.product_addons
+  for select
+  to anon, authenticated
+  using (true);
+
+-- Pedidos: valida produto, quantidade, adicionais e observação.
 create or replace function public.place_order(p_items jsonb)
 returns public.orders
 language plpgsql
@@ -30,7 +56,15 @@ begin
 
   if exists (
     select 1
-    from jsonb_to_recordset(p_items) as requested(id bigint, quantity integer, special_sauce boolean, note text)
+    from jsonb_to_recordset(p_items) as requested(id bigint, quantity integer, addon_ids jsonb, note text)
+    where requested.addon_ids is not null and jsonb_typeof(requested.addon_ids) <> 'array'
+  ) then
+    raise exception 'Add-ons must be a JSON array.';
+  end if;
+
+  if exists (
+    select 1
+    from jsonb_to_recordset(p_items) as requested(id bigint, quantity integer, addon_ids jsonb, note text)
     left join public.menu_catalog as product on product.id = requested.id
     where product.id is null
       or product.available is not true
@@ -40,9 +74,37 @@ begin
   end if;
 
   if exists (
-    select requested.id
-    from jsonb_to_recordset(p_items) as requested(id bigint, quantity integer, special_sauce boolean, note text)
-    group by requested.id, coalesce(requested.special_sauce, false), nullif(trim(coalesce(requested.note, '')), '')
+    select 1
+    from jsonb_to_recordset(p_items) as requested(id bigint, quantity integer, addon_ids jsonb, note text)
+    cross join lateral jsonb_array_elements(coalesce(requested.addon_ids, '[]'::jsonb)) as addon_id(value)
+    left join public.product_addons as addon
+      on addon.id::text = addon_id.value::text
+     and addon.available is true
+    where addon.id is null
+  ) then
+    raise exception 'An order contains an invalid add-on.';
+  end if;
+
+  if exists (
+    select 1
+    from jsonb_to_recordset(p_items) as requested(id bigint, quantity integer, addon_ids jsonb, note text)
+    join public.menu_catalog as product on product.id = requested.id
+    where jsonb_array_length(coalesce(requested.addon_ids, '[]'::jsonb)) > 0
+      and product.category not in ('Burgers', 'Hot Dog')
+  ) then
+    raise exception 'Add-ons are only available for burgers and hot dogs.';
+  end if;
+
+  if exists (
+    select 1
+    from (
+      select
+        requested.id,
+        coalesce(requested.addon_ids, '[]'::jsonb)::text as addon_key,
+        nullif(trim(coalesce(requested.note, '')), '') as note
+      from jsonb_to_recordset(p_items) as requested(id bigint, quantity integer, addon_ids jsonb, note text)
+    ) as normalized
+    group by normalized.id, normalized.addon_key, normalized.note
     having count(*) > 1
   ) then
     raise exception 'The same product with the same options can only appear once.';
@@ -59,20 +121,37 @@ begin
 
   select
     sum(
-      (product.price_cents + case when coalesce(requested.special_sauce, false) then 300 else 0 end)
-      * requested.quantity
+      (
+        product.price_cents + coalesce((
+          select sum(addon.price_cents)::integer
+          from jsonb_array_elements(coalesce(requested.addon_ids, '[]'::jsonb)) as addon_id(value)
+          join public.product_addons as addon on addon.id::text = addon_id.value::text
+        ), 0)
+      ) * requested.quantity
     )::integer,
     jsonb_agg(jsonb_build_object(
       'id', product.id,
       'name', product.name,
       'quantity', requested.quantity,
       'unit_price_cents',
-        product.price_cents + case when coalesce(requested.special_sauce, false) then 300 else 0 end,
-      'special_sauce', coalesce(requested.special_sauce, false),
+        product.price_cents + coalesce((
+          select sum(addon.price_cents)::integer
+          from jsonb_array_elements(coalesce(requested.addon_ids, '[]'::jsonb)) as addon_id(value)
+          join public.product_addons as addon on addon.id::text = addon_id.value::text
+        ), 0),
+      'addons', coalesce((
+        select jsonb_agg(jsonb_build_object(
+          'id', addon.id,
+          'name', addon.name,
+          'price_cents', addon.price_cents
+        ) order by addon.name)
+        from jsonb_array_elements(coalesce(requested.addon_ids, '[]'::jsonb)) as addon_id(value)
+        join public.product_addons as addon on addon.id::text = addon_id.value::text
+      ), '[]'::jsonb),
       'note', nullif(trim(coalesce(requested.note, '')), '')
     ))
   into subtotal, validated_items
-  from jsonb_to_recordset(p_items) as requested(id bigint, quantity integer, special_sauce boolean, note text)
+  from jsonb_to_recordset(p_items) as requested(id bigint, quantity integer, addon_ids jsonb, note text)
   join public.menu_catalog as product on product.id = requested.id;
 
   insert into public.orders (
@@ -110,3 +189,4 @@ $$;
 
 revoke all on function public.place_order(jsonb) from public, anon;
 grant execute on function public.place_order(jsonb) to authenticated;
+

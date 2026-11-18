@@ -1,4 +1,6 @@
 import { createClient } from "@supabase/supabase-js";
+import type { SaleOrder } from "../../lib/database.types";
+import { notifyStoreOnWhatsApp } from "../../lib/whatsapp";
 
 type OrderRequest = {
   items?: unknown;
@@ -66,7 +68,10 @@ export async function POST(request: Request) {
     return jsonError("O Supabase não retornou o pedido criado.", 500);
   }
 
-  await notifyWebhook(order);
+  const [, whatsappResult] = await Promise.all([
+    notifyWebhook(order),
+    notifyStoreOnWhatsApp(order as SaleOrder),
+  ]);
 
-  return Response.json({ order });
+  return Response.json({ order, whatsapp: whatsappResult });
 }

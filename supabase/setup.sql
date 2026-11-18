@@ -1,6 +1,8 @@
 -- Configuração completa do banco do cardápio digital.
 -- Execute UMA VEZ no Supabase: Dashboard -> SQL Editor -> New query -> Cole -> Run.
 -- O script é seguro para executar novamente (não duplica dados nem quebra nada).
+-- Se aparecer "Could not find the table ... in the schema cache" depois de rodar,
+-- execute: notify pgrst, 'reload schema'; e recarregue o app.
 
 do $$
 begin
@@ -10,7 +12,7 @@ begin
     where t.typname = 'order_status' and n.nspname = 'public'
   ) then
     execute 'create type public.order_status as enum ('
-      || '''pending'', ''preparing'', ''ready'', ''out_for_delivery'', ''delivered'', ''cancelled''
+      || '''pending'', ''preparing'', ''ready'', ''out_for_delivery'', ''delivered'', ''cancelled'''
       || ')';
   end if;
 end $$;
@@ -96,7 +98,32 @@ create policy "Admins can update order status"
   using ((select auth.jwt() -> 'app_metadata' ->> 'role') = 'admin')
   with check ((select auth.jwt() -> 'app_metadata' ->> 'role') = 'admin');
 
--- Pedidos: valida produto, quantidade, molho especial (R$ 3,00) e observação.
+-- Adicionais cadastrados no painel (molho especial, bacon, cheddar etc.).
+create table if not exists public.product_addons (
+  id bigint generated always as identity primary key,
+  name text not null unique check (length(trim(name)) between 1 and 40),
+  price_cents integer not null check (price_cents > 0),
+  available boolean not null default true,
+  created_at timestamptz not null default now()
+);
+
+insert into public.product_addons (name, price_cents)
+select seed.name, seed.price_cents
+from (values ('Molho especial', 300), ('Bacon crocante', 500), ('Cheddar extra', 450), ('Ovo caipira', 300)) as seed(name, price_cents)
+where not exists (select 1 from public.product_addons where name = seed.name);
+
+alter table public.product_addons enable row level security;
+
+grant select on public.product_addons to anon, authenticated;
+
+drop policy if exists "Add-ons are public" on public.product_addons;
+create policy "Add-ons are public"
+  on public.product_addons
+  for select
+  to anon, authenticated
+  using (true);
+
+-- Pedidos: valida produto, quantidade, adicionais e observação.
 create or replace function public.place_order(p_items jsonb)
 returns public.orders
 language plpgsql
@@ -124,7 +151,15 @@ begin
 
   if exists (
     select 1
-    from jsonb_to_recordset(p_items) as requested(id bigint, quantity integer, special_sauce boolean, note text)
+    from jsonb_to_recordset(p_items) as requested(id bigint, quantity integer, addon_ids jsonb, note text)
+    where requested.addon_ids is not null and jsonb_typeof(requested.addon_ids) <> 'array'
+  ) then
+    raise exception 'Add-ons must be a JSON array.';
+  end if;
+
+  if exists (
+    select 1
+    from jsonb_to_recordset(p_items) as requested(id bigint, quantity integer, addon_ids jsonb, note text)
     left join public.menu_catalog as product on product.id = requested.id
     where product.id is null
       or product.available is not true
@@ -134,9 +169,37 @@ begin
   end if;
 
   if exists (
-    select requested.id
-    from jsonb_to_recordset(p_items) as requested(id bigint, quantity integer, special_sauce boolean, note text)
-    group by requested.id, coalesce(requested.special_sauce, false), nullif(trim(coalesce(requested.note, '')), '')
+    select 1
+    from jsonb_to_recordset(p_items) as requested(id bigint, quantity integer, addon_ids jsonb, note text)
+    cross join lateral jsonb_array_elements(coalesce(requested.addon_ids, '[]'::jsonb)) as addon_id(value)
+    left join public.product_addons as addon
+      on addon.id::text = addon_id.value::text
+     and addon.available is true
+    where addon.id is null
+  ) then
+    raise exception 'An order contains an invalid add-on.';
+  end if;
+
+  if exists (
+    select 1
+    from jsonb_to_recordset(p_items) as requested(id bigint, quantity integer, addon_ids jsonb, note text)
+    join public.menu_catalog as product on product.id = requested.id
+    where jsonb_array_length(coalesce(requested.addon_ids, '[]'::jsonb)) > 0
+      and product.category not in ('Burgers', 'Hot Dog')
+  ) then
+    raise exception 'Add-ons are only available for burgers and hot dogs.';
+  end if;
+
+  if exists (
+    select 1
+    from (
+      select
+        requested.id,
+        coalesce(requested.addon_ids, '[]'::jsonb)::text as addon_key,
+        nullif(trim(coalesce(requested.note, '')), '') as note
+      from jsonb_to_recordset(p_items) as requested(id bigint, quantity integer, addon_ids jsonb, note text)
+    ) as normalized
+    group by normalized.id, normalized.addon_key, normalized.note
     having count(*) > 1
   ) then
     raise exception 'The same product with the same options can only appear once.';
@@ -153,20 +216,37 @@ begin
 
   select
     sum(
-      (product.price_cents + case when coalesce(requested.special_sauce, false) then 300 else 0 end)
-      * requested.quantity
+      (
+        product.price_cents + coalesce((
+          select sum(addon.price_cents)::integer
+          from jsonb_array_elements(coalesce(requested.addon_ids, '[]'::jsonb)) as addon_id(value)
+          join public.product_addons as addon on addon.id::text = addon_id.value::text
+        ), 0)
+      ) * requested.quantity
     )::integer,
     jsonb_agg(jsonb_build_object(
       'id', product.id,
       'name', product.name,
       'quantity', requested.quantity,
       'unit_price_cents',
-        product.price_cents + case when coalesce(requested.special_sauce, false) then 300 else 0 end,
-      'special_sauce', coalesce(requested.special_sauce, false),
+        product.price_cents + coalesce((
+          select sum(addon.price_cents)::integer
+          from jsonb_array_elements(coalesce(requested.addon_ids, '[]'::jsonb)) as addon_id(value)
+          join public.product_addons as addon on addon.id::text = addon_id.value::text
+        ), 0),
+      'addons', coalesce((
+        select jsonb_agg(jsonb_build_object(
+          'id', addon.id,
+          'name', addon.name,
+          'price_cents', addon.price_cents
+        ) order by addon.name)
+        from jsonb_array_elements(coalesce(requested.addon_ids, '[]'::jsonb)) as addon_id(value)
+        join public.product_addons as addon on addon.id::text = addon_id.value::text
+      ), '[]'::jsonb),
       'note', nullif(trim(coalesce(requested.note, '')), '')
     ))
   into subtotal, validated_items
-  from jsonb_to_recordset(p_items) as requested(id bigint, quantity integer, special_sauce boolean, note text)
+  from jsonb_to_recordset(p_items) as requested(id bigint, quantity integer, addon_ids jsonb, note text)
   join public.menu_catalog as product on product.id = requested.id;
 
   insert into public.orders (
@@ -205,13 +285,18 @@ $$;
 revoke all on function public.place_order(jsonb) from public, anon;
 grant execute on function public.place_order(jsonb) to authenticated;
 
--- Descrição, categoria, imagem, promoção e selo dos produtos do cardápio.
+-- Descrição, categoria, imagem, promoção, selo e destaque dos produtos do cardápio.
 alter table public.menu_catalog
   add column if not exists description text not null default '',
   add column if not exists category text not null default 'Burgers',
   add column if not exists image text not null default '',
   add column if not exists old_price_cents integer,
-  add column if not exists badge text;
+  add column if not exists badge text,
+  add column if not exists highlighted boolean not null default false;
+
+update public.menu_catalog set highlighted = true
+where id in (1, 2, 6)
+  and (select count(*) from public.menu_catalog where highlighted) = 0;
 
 update public.menu_catalog set
   description = 'Smash 160g, queijo prato, cebola caramelizada e molho da casa.',
@@ -237,7 +322,7 @@ where id = 3;
 update public.menu_catalog set
   description = 'Limão-taiti, toque de siciliano e hortelã fresca.',
   category = 'Bebidas',
-  image = 'https://images.pexels.com/photos/410648/pexels-photo-410648.jpeg?auto=compress&cs=tinysrgb&w=800'
+  image = 'https://images.unsplash.com/photo-1513558161293-cdaf765ed2fd?auto=format&fit=crop&w=800&q=85'
 where id = 4;
 
 update public.menu_catalog set
@@ -311,7 +396,7 @@ where id = 15;
 update public.menu_catalog set
   description = 'Soda italiana refrescante com frutas vermelhas.',
   category = 'Bebidas',
-  image = 'https://images.pexels.com/photos/376464/pexels-photo-376464.jpeg?auto=compress&cs=tinysrgb&w=800'
+  image = 'https://images.unsplash.com/photo-1544145945-f90425340c7e?auto=format&fit=crop&w=800&q=85'
 where id = 16;
 
 -- Armazenamento público para as imagens enviadas pelo painel Admin.
@@ -345,3 +430,42 @@ create policy "Admins can delete product images"
     bucket_id = 'product-images'
     and (select auth.jwt() -> 'app_metadata' ->> 'role') = 'admin'
   );
+
+-- Alertas em tempo real: novo pedido no painel administrativo e mudanças de
+-- status no acompanhamento do cliente. RLS continua limitando cada usuário
+-- aos próprios pedidos (admins podem ver todos).
+alter table public.orders replica identity full;
+
+do $$
+begin
+  alter publication supabase_realtime add table public.orders;
+exception
+  when duplicate_object then null;
+end $$;
+
+-- Categorias gerenciadas pelo painel administrativo.
+create table if not exists public.product_categories (
+  id bigint generated always as identity primary key,
+  name text not null unique check (length(trim(name)) between 1 and 40),
+  created_at timestamptz not null default now()
+);
+
+insert into public.product_categories (name)
+select category
+from (
+  values ('Burgers'), ('Hot Dog'), ('Combos'), ('Acompanhamentos'), ('Bebidas')
+) as defaults(category)
+where not exists (
+  select 1 from public.product_categories where name = defaults.category
+);
+
+alter table public.product_categories enable row level security;
+
+grant select on public.product_categories to anon, authenticated;
+
+drop policy if exists "Categories are public" on public.product_categories;
+create policy "Categories are public"
+  on public.product_categories
+  for select
+  to anon, authenticated
+  using (true);

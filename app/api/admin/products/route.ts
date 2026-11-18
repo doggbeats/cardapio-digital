@@ -1,6 +1,6 @@
 import { getServiceClient, requireAdmin } from "../../../lib/admin-server";
-
-const CATEGORIES = new Set(["Burgers", "Hot Dog", "Combos", "Acompanhamentos", "Bebidas"]);
+import { isCategoryAllowed } from "../../../lib/admin-categories";
+import { imageForProduct } from "../../../lib/product-images";
 
 type ProductInput = {
   name?: unknown;
@@ -11,6 +11,7 @@ type ProductInput = {
   old_price_cents?: unknown;
   badge?: unknown;
   available?: unknown;
+  highlighted?: unknown;
 };
 
 function validate(input: ProductInput) {
@@ -31,24 +32,22 @@ function validate(input: ProductInput) {
 
   if (!name) return "Informe o nome do produto.";
   if (!Number.isFinite(priceCents) || priceCents <= 0) return "Informe um preço válido.";
-  if (!CATEGORIES.has(category)) return "Escolha uma categoria válida.";
   if (
     oldPriceCents !== null &&
     (!Number.isFinite(oldPriceCents) || oldPriceCents <= priceCents)
   ) {
     return "O preço promocional deve ser menor que o preço normal.";
   }
-  if (!image) return "Informe a URL da imagem.";
-
   return {
     name,
     description,
     price_cents: priceCents,
     category,
-    image,
+    image: image || imageForProduct(name, description),
     old_price_cents: oldPriceCents,
     badge: badge || null,
     available: input.available !== false,
+    highlighted: input.highlighted === true,
   };
 }
 
@@ -77,6 +76,9 @@ export async function POST(request: Request) {
   }
   const values = validate(body);
   if (typeof values === "string") return errorResponse(values, 400);
+  if (!(await isCategoryAllowed(values.category))) {
+    return errorResponse("Escolha uma categoria válida.", 400);
+  }
 
   const { data: next } = await getServiceClient()
     .from("menu_catalog")

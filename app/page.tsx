@@ -1,33 +1,43 @@
 "use client";
 
 import Image from "next/image";
-import { type User } from "@supabase/supabase-js";
+import { type RealtimeChannel, type User } from "@supabase/supabase-js";
 import {
   type ChangeEvent,
   type FormEvent,
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
   useSyncExternalStore,
 } from "react";
-import { type OrderItem, type OrderStatus, type SaleOrder } from "./lib/database.types";
+import {
+  notifyNewOrderArrival,
+  playNewOrderAlarm,
+  requestNotificationPermission,
+  unlockOrderAlarm,
+} from "./lib/order-alarm";
+import { DEFAULT_CATEGORIES, type AdminCategory } from "./lib/categories";
+import { type OrderAddon, type OrderStatus, type SaleOrder } from "./lib/database.types";
+import {
+  formatOrderItem,
+  formatPrice,
+  getStoreWhatsAppUrl,
+  STORE_WHATSAPP_NUMBER,
+  type WhatsAppNotificationResult,
+} from "./lib/order-summary";
+import { imageForProduct } from "./lib/product-images";
 import { getSupabaseClient } from "./lib/supabase";
 import CookieConsent from "./components/CookieConsent";
+import MetaPixel from "./components/MetaPixel";
 
-type Category =
-  | "Todos"
-  | "Burgers"
-  | "Hot Dog"
-  | "Combos"
-  | "Acompanhamentos"
-  | "Bebidas"
-  | "Favoritos";
-type Tab = "Início" | "Promoções" | "Pedidos" | "Perfil" | "Admin";
-type ProductCategory = Exclude<Category, "Todos" | "Favoritos">;
+type Category = string;
+type Tab = "Início" | "Ofertas" | "Pedidos" | "Perfil" | "Admin";
+type ProductCategory = string;
 type AuthMode = "login" | "register";
 type ProfileAction = "password" | "address" | null;
-type AdminSection = "sales" | "products";
+type AdminSection = "sales" | "products" | "categories" | "addons";
 
 type AdminProduct = {
   id: number;
@@ -39,20 +49,32 @@ type AdminProduct = {
   old_price_cents: number | null;
   badge: string | null;
   available: boolean;
+  highlighted: boolean;
 };
+type AdminAddon = OrderAddon & { available: boolean };
 type CartLine = {
   productId: number;
-  specialSauce: boolean;
+  addonIds: number[];
   note: string;
   quantity: number;
 };
 type Cart = Record<string, CartLine>;
 
-const SPECIAL_SAUCE_PRICE_CENTS = 300;
-
-function makeCartKey(productId: number, specialSauce: boolean, note: string) {
-  return `${productId}|${specialSauce ? 1 : 0}|${note.trim()}`;
+function makeCartKey(productId: number, addonIds: number[], note: string) {
+  return `${productId}|${[...addonIds].sort((a, b) => a - b).join(",")}|${note.trim()}`;
 }
+
+function lineAddons(line: CartLine, addons: OrderAddon[]) {
+  return addons.filter((addon) => line.addonIds.includes(addon.id));
+}
+
+function lineUnitPrice(line: CartLine, product: Product, addons: OrderAddon[]) {
+  return (
+    product.price + lineAddons(line, addons).reduce((total, addon) => total + addon.price_cents / 100, 0)
+  );
+}
+
+const ADDON_CATEGORIES = ["Burgers", "Hot Dog"];
 
 function productCartQuantity(cart: Cart, productId: number) {
   return Object.values(cart)
@@ -69,6 +91,7 @@ type Product = {
   category: ProductCategory;
   image: string;
   badge?: string;
+  highlighted?: boolean;
 };
 
 const seedProducts: Product[] = [
@@ -81,6 +104,7 @@ const seedProducts: Product[] = [
     image:
       "https://images.unsplash.com/photo-1568901346375-23c9450c58cd?auto=format&fit=crop&w=800&q=85",
     badge: "Mais pedido",
+    highlighted: true,
   },
   {
     id: 2,
@@ -92,6 +116,7 @@ const seedProducts: Product[] = [
     image:
       "https://images.pexels.com/photos/1633527/pexels-photo-1633527.jpeg?auto=compress&cs=tinysrgb&w=800",
     badge: "Oferta",
+    highlighted: true,
   },
   {
     id: 5,
@@ -112,6 +137,7 @@ const seedProducts: Product[] = [
     image:
       "https://images.unsplash.com/photo-1550547660-d9450f859349?auto=format&fit=crop&w=800&q=85",
     badge: "Completo",
+    highlighted: true,
   },
   {
     id: 3,
@@ -129,7 +155,7 @@ const seedProducts: Product[] = [
     price: 12.9,
     category: "Bebidas",
     image:
-      "https://images.pexels.com/photos/410648/pexels-photo-410648.jpeg?auto=compress&cs=tinysrgb&w=800",
+      "https://images.unsplash.com/photo-1513558161293-cdaf765ed2fd?auto=format&fit=crop&w=800&q=85",
   },
   {
     id: 7,
@@ -219,7 +245,7 @@ const seedProducts: Product[] = [
     price: 14.9,
     category: "Bebidas",
     image:
-      "https://images.pexels.com/photos/376464/pexels-photo-376464.jpeg?auto=compress&cs=tinysrgb&w=800",
+      "https://images.unsplash.com/photo-1544145945-f90425340c7e?auto=format&fit=crop&w=800&q=85",
   },
 ];
 
@@ -233,6 +259,7 @@ function adminProductToProduct(item: AdminProduct): Product {
     category: item.category,
     image: item.image,
     badge: item.badge ?? undefined,
+    highlighted: item.highlighted,
   };
 }
 
@@ -245,10 +272,8 @@ const emptyProductForm = {
   oldPrice: "",
   badge: "",
   available: true,
+  highlighted: false,
 };
-
-const DEFAULT_PRODUCT_IMAGE =
-  "https://images.unsplash.com/photo-1546069901-ba9599a7e63c?auto=format&fit=crop&w=800&q=85";
 
 async function getAdminToken() {
   const {
@@ -263,15 +288,6 @@ function priceToCents(value: string) {
   return Math.round(Number(value.replace(",", ".")) * 100);
 }
 
-const categories: Category[] = [
-  "Todos",
-  "Burgers",
-  "Hot Dog",
-  "Combos",
-  "Acompanhamentos",
-  "Bebidas",
-  "Favoritos",
-];
 const activeProfile = { id: "marina", name: "Marina" };
 const favoritesStorageEvent = "cardapio:favorites:change";
 const orderStatuses: OrderStatus[] = [
@@ -297,7 +313,7 @@ function isOrderStatus(value: string): value is OrderStatus {
 
 const navigation: { name: Tab; icon: string }[] = [
   { name: "Início", icon: "home" },
-  { name: "Promoções", icon: "tag" },
+  { name: "Ofertas", icon: "tag" },
   { name: "Pedidos", icon: "receipt" },
   { name: "Perfil", icon: "user" },
 ];
@@ -504,21 +520,6 @@ function PasswordInput({
   );
 }
 
-function formatPrice(price: number) {
-  return price.toLocaleString("pt-BR", {
-    style: "currency",
-    currency: "BRL",
-  });
-}
-
-function formatOrderItem(item: OrderItem) {
-  const details = [
-    item.special_sauce ? "+ molho especial" : "",
-    item.note ? `obs: ${item.note}` : "",
-  ].filter(Boolean);
-  return `${item.quantity}× ${item.name}${details.length ? ` (${details.join(", ")})` : ""}`;
-}
-
 function getUserName(user: User) {
   const fullName = user.user_metadata.full_name;
   if (typeof fullName === "string" && fullName.trim()) return fullName.trim();
@@ -558,32 +559,8 @@ function getOrderWhatsAppUrl(order: SaleOrder) {
   return `https://wa.me/${phone}?text=${encodeURIComponent(message)}`;
 }
 
-const STORE_WHATSAPP_NUMBER = "6192890326";
-
-function getStoreWhatsAppUrl(order: SaleOrder) {
-  const itemLines = order.items
-    .map(
-      (item) =>
-        `${formatOrderItem(item)} - ${formatPrice((item.unit_price_cents * item.quantity) / 100)}`,
-    )
-    .join("\n");
-  const message = [
-    `🔔 *NOVO PEDIDO #${String(order.id).padStart(4, "0")}*`,
-    `Cliente: ${order.customer_name || order.customer_email}`,
-    order.customer_phone ? `Telefone: ${order.customer_phone}` : "",
-    "",
-    "*Itens:*",
-    itemLines,
-    "",
-    `Subtotal: ${formatPrice(order.subtotal_cents / 100)}`,
-    `Entrega: ${formatPrice(order.delivery_fee_cents / 100)}`,
-    `*Total: ${formatPrice(order.total_cents / 100)}*`,
-    "",
-    `*Endereço de entrega:* ${order.customer_address}`,
-  ]
-    .filter(Boolean)
-    .join("\n");
-  return `https://wa.me/${STORE_WHATSAPP_NUMBER}?text=${encodeURIComponent(message)}`;
+function getDeliveryCep(address: string) {
+  return address.match(/\d{5}-?\d{3}/)?.[0] ?? null;
 }
 
 function getTodayRange() {
@@ -646,12 +623,100 @@ function DeliveryLine({
   );
 }
 
+function PreparationTracker() {
+  return (
+    <div className="prep-tracker" role="status" aria-label="Pedido em preparo">
+      <div className="prep-scene" aria-hidden="true">
+        <span className="prep-steam steam-1" />
+        <span className="prep-steam steam-2" />
+        <span className="prep-steam steam-3" />
+        <span className="prep-pan">
+          <svg viewBox="0 0 64 44" width="62" height="42">
+            <path
+              d="M6 16h44v8a11 11 0 0 1-11 11H17A11 11 0 0 1 6 24v-8Z"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="3"
+              strokeLinejoin="round"
+            />
+            <path d="M50 19h9" stroke="currentColor" strokeWidth="3" strokeLinecap="round" />
+            <path
+              d="M15 24c4-4 8 4 12 0s8 4 12 0"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2.5"
+              strokeLinecap="round"
+            />
+          </svg>
+        </span>
+        <span className="prep-flame flame-1" />
+        <span className="prep-flame flame-2" />
+        <span className="prep-flame flame-3" />
+      </div>
+      <div className="prep-copy">
+        <strong><span className="status-dot" /> Preparando seu pedido</strong>
+        <span>A cozinha já está caprichando nos detalhes.</span>
+      </div>
+    </div>
+  );
+}
+
+function DeliveryTracker({ address }: { address: string }) {
+  const cep = getDeliveryCep(address);
+  return (
+    <div className="delivery-tracker" role="status" aria-label="Entregador a caminho">
+      <div className="delivery-tracker-heading">
+        <span className="delivery-tracker-live"><span className="status-dot" /> Entregador a caminho</span>
+        {cep && <span>CEP {cep}</span>}
+      </div>
+      <div className="delivery-road" aria-hidden="true">
+        <span className="delivery-road-line" />
+        <span className="delivery-road-start"><Icon name="pin" size={14} /></span>
+        <span className="delivery-bike">
+          <svg viewBox="0 0 64 40" width="54" height="34" aria-hidden="true">
+            <circle cx="15" cy="29" r="8" fill="none" stroke="currentColor" strokeWidth="3" />
+            <circle cx="49" cy="29" r="8" fill="none" stroke="currentColor" strokeWidth="3" />
+            <path
+              d="M15 29h10l8-12h9l7 12M33 17l-4-7h-5M31 11l6 6"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="3"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+            <circle cx="38" cy="7" r="4" fill="currentColor" />
+          </svg>
+        </span>
+        <span className="delivery-road-end"><Icon name="check" size={14} /></span>
+      </div>
+      <p className="delivery-tracker-address">
+        <Icon name="pin" size={14} /> {address}
+      </p>
+    </div>
+  );
+}
+
 export default function Home() {
   const [activeTab, setActiveTab] = useState<Tab>("Início");
   const [adminSection, setAdminSection] = useState<AdminSection>("sales");
   const [products, setProducts] = useState<Product[]>(seedProducts);
   const [adminProducts, setAdminProducts] = useState<AdminProduct[]>([]);
+  const [adminProductSearch, setAdminProductSearch] = useState("");
+  const [adminProductCategory, setAdminProductCategory] = useState("all");
   const [productsLoading, setProductsLoading] = useState(false);
+  const [adminCategories, setAdminCategories] = useState<AdminCategory[]>([]);
+  const [categoriesLoaded, setCategoriesLoaded] = useState(false);
+  const [newCategoryName, setNewCategoryName] = useState("");
+  const [categoryError, setCategoryError] = useState<string | null>(null);
+  const [categoryMessage, setCategoryMessage] = useState<string | null>(null);
+  const [categorySaving, setCategorySaving] = useState(false);
+  const [addons, setAddons] = useState<OrderAddon[]>([]);
+  const [adminAddons, setAdminAddons] = useState<AdminAddon[]>([]);
+  const [newAddonName, setNewAddonName] = useState("");
+  const [newAddonPrice, setNewAddonPrice] = useState("");
+  const [addonError, setAddonError] = useState<string | null>(null);
+  const [addonMessage, setAddonMessage] = useState<string | null>(null);
+  const [addonSaving, setAddonSaving] = useState(false);
   const [productForm, setProductForm] = useState(emptyProductForm);
   const [editingProductId, setEditingProductId] = useState<number | null>(null);
   const [productSaving, setProductSaving] = useState(false);
@@ -682,7 +747,7 @@ export default function Home() {
   const [newPassword, setNewPassword] = useState("");
   const [confirmNewPassword, setConfirmNewPassword] = useState("");
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
-  const [productSauce, setProductSauce] = useState(false);
+  const [productAddonIds, setProductAddonIds] = useState<number[]>([]);
   const [productNote, setProductNote] = useState("");
   const [cartOpen, setCartOpen] = useState(false);
   const [orderConfirmOpen, setOrderConfirmOpen] = useState(false);
@@ -699,11 +764,102 @@ export default function Home() {
   const [updatingOrderId, setUpdatingOrderId] = useState<number | null>(null);
   const [customerOrders, setCustomerOrders] = useState<SaleOrder[]>([]);
   const [storeWhatsAppUrl, setStoreWhatsAppUrl] = useState<string | null>(null);
+  const [storeWhatsAppSent, setStoreWhatsAppSent] = useState(false);
+  const [newOrderAlert, setNewOrderAlert] = useState<SaleOrder | null>(null);
+  const [newOrderCount, setNewOrderCount] = useState(0);
+  const [notificationPermission, setNotificationPermission] = useState<
+    NotificationPermission | "unsupported"
+  >("default");
+  const [realtimeConnected, setRealtimeConnected] = useState(false);
   const [customerOrdersLoading, setCustomerOrdersLoading] = useState(false);
   const [customerOrdersError, setCustomerOrdersError] = useState<string | null>(null);
   const [ordersRefresh, setOrdersRefresh] = useState(0);
+  const categories = useMemo(() => {
+    const names = categoriesLoaded ? adminCategories.map((item) => item.name) : DEFAULT_CATEGORIES;
+    return ["Todos", ...names, "Destaques", "Favoritos"];
+  }, [adminCategories, categoriesLoaded]);
+  const loadCategories = useCallback(async () => {
+    try {
+      const { data, error } = await getSupabaseClient()
+        .from("product_categories")
+        .select("id, name")
+        .order("name", { ascending: true });
+      if (error) throw error;
+      setAdminCategories(data ?? []);
+    } catch (error) {
+      console.error("Não foi possível carregar as categorias:", error);
+    } finally {
+      setCategoriesLoaded(true);
+    }
+  }, []);
+  const loadAdminAddons = useCallback(async () => {
+    try {
+      const token = await getAdminToken();
+      const response = await fetch("/api/admin/addons", {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const payload = (await response.json().catch(() => null)) as
+        | { addons?: AdminAddon[]; error?: string }
+        | null;
+      if (!response.ok) throw new Error(payload?.error ?? "Não foi possível carregar os adicionais.");
+      setAdminAddons(payload?.addons ?? []);
+    } catch (error) {
+      console.error("Não foi possível carregar os adicionais:", error);
+    }
+  }, []);
   const favoritesStorageKey = `cardapio:favorites:${activeProfile.id}`;
   const isAdmin = authUser?.app_metadata.role === "admin";
+  const activeTabRef = useRef(activeTab);
+  const seenOrderIdsRef = useRef<Set<number>>(new Set());
+  const ordersSeededRef = useRef(false);
+  useEffect(() => {
+    activeTabRef.current = activeTab;
+  }, [activeTab]);
+
+  // O áudio só pode ser liberado após um gesto do usuário. Registramos o
+  // desbloqueio no primeiro clique/toque/tecla para que o alarme toque depois.
+  useEffect(() => {
+    const unlock = () => {
+      unlockOrderAlarm();
+      window.removeEventListener("pointerdown", unlock);
+      window.removeEventListener("keydown", unlock);
+    };
+    window.addEventListener("pointerdown", unlock);
+    window.addEventListener("keydown", unlock);
+    return () => {
+      window.removeEventListener("pointerdown", unlock);
+      window.removeEventListener("keydown", unlock);
+    };
+  }, []);
+
+  useEffect(() => {
+    void Promise.resolve().then(() => {
+      setNotificationPermission(
+        typeof window === "undefined" || !("Notification" in window)
+          ? "unsupported"
+          : Notification.permission,
+      );
+    });
+  }, []);
+
+  const handleIncomingOrder = useCallback((order: SaleOrder) => {
+    if (seenOrderIdsRef.current.has(order.id)) return;
+    seenOrderIdsRef.current.add(order.id);
+
+    setSaleOrders((current) =>
+      current.some((item) => item.id === order.id) ? current : [order, ...current],
+    );
+    setNewOrderCount((count) => count + 1);
+    setNewOrderAlert(order);
+    if (activeTabRef.current === "Admin") {
+      playNewOrderAlarm();
+    }
+    notifyNewOrderArrival(
+      `Pedido #${String(order.id).padStart(4, "0")} de ${order.customer_name || order.customer_email} - ${formatPrice(order.total_cents / 100)}`,
+      `novo-pedido-${order.id}`,
+    );
+  }, []);
+
   const deliveryAddress = authUser
     ? getUserAddress(authUser) || "Cadastre seu endereço"
     : "Faça login para informar o endereço";
@@ -767,6 +923,30 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    void Promise.resolve().then(loadCategories);
+  }, [loadCategories]);
+
+  useEffect(() => {
+    let isMounted = true;
+    void getSupabaseClient()
+      .from("product_addons")
+      .select("id, name, price_cents")
+      .eq("available", true)
+      .order("name", { ascending: true })
+      .then(({ data, error }) => {
+        if (!isMounted) return;
+        if (error) {
+          console.error("Não foi possível carregar os adicionais:", error.message);
+          return;
+        }
+        setAddons(data ?? []);
+      });
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
     if (activeTab !== "Admin" || !isAdmin) return;
     let isMounted = true;
 
@@ -781,6 +961,10 @@ export default function Home() {
         if (!isMounted) return;
         if (error) throw error;
         setSaleOrders(data);
+        if (!ordersSeededRef.current) {
+          data.forEach((order) => seenOrderIdsRef.current.add(order.id));
+          ordersSeededRef.current = true;
+        }
         setSalesError(null);
         setSalesLoading(false);
       })
@@ -829,7 +1013,113 @@ export default function Home() {
     };
   }, [activeTab, authUser, ordersRefresh]);
 
-  const isPromotions = activeTab === "Promoções";
+  useEffect(() => {
+    if (!authUser) return;
+    let isMounted = true;
+    let cleanup = () => {};
+
+    try {
+      const supabase = getSupabaseClient();
+      const channels: RealtimeChannel[] = [];
+
+      if (isAdmin) {
+        channels.push(
+          supabase
+            .channel("admin-new-orders")
+            .on(
+              "postgres_changes",
+              { event: "INSERT", schema: "public", table: "orders" },
+              (payload) => {
+                if (!isMounted) return;
+                handleIncomingOrder(payload.new as SaleOrder);
+              },
+            )
+            .subscribe((status) => {
+              if (isMounted) setRealtimeConnected(status === "SUBSCRIBED");
+            }),
+        );
+      }
+
+      channels.push(
+        supabase
+          .channel(`customer-orders-${authUser.id}`)
+          .on(
+            "postgres_changes",
+            {
+              event: "UPDATE",
+              schema: "public",
+              table: "orders",
+              filter: `user_id=eq.${authUser.id}`,
+            },
+            (payload) => {
+              if (!isMounted) return;
+              const updated = payload.new as SaleOrder;
+              setCustomerOrders((current) =>
+                current.map((order) => (order.id === updated.id ? updated : order)),
+              );
+            },
+          )
+          .subscribe(),
+      );
+
+      cleanup = () => {
+        channels.forEach((channel) => void supabase.removeChannel(channel));
+      };
+    } catch (error) {
+      console.error("Não foi possível acompanhar os pedidos em tempo real:", error);
+    }
+
+    return () => {
+      isMounted = false;
+      cleanup();
+      setRealtimeConnected(false);
+    };
+  }, [authUser, isAdmin, handleIncomingOrder]);
+
+  // Fallback: se o Realtime não estiver ativo (a tabela orders não foi
+  // adicionada à publicação supabase_realtime), consultamos novos pedidos
+  // periodicamente enquanto o painel administrativo estiver aberto.
+  useEffect(() => {
+    if (!isAdmin || activeTab !== "Admin") return;
+    let isMounted = true;
+
+    const checkNewOrders = async () => {
+      try {
+        const { data, error } = await getSupabaseClient()
+          .from("orders")
+          .select("*")
+          .order("created_at", { ascending: false })
+          .limit(50);
+        if (!isMounted || error || !data) return;
+        if (!ordersSeededRef.current) {
+          data.forEach((order) => seenOrderIdsRef.current.add(order.id));
+          ordersSeededRef.current = true;
+          return;
+        }
+        data.forEach((order) => handleIncomingOrder(order as SaleOrder));
+      } catch {
+        // Silencioso: o Realtime pode estar ativo e o aviso já ter chegado.
+      }
+    };
+
+    const timer = window.setInterval(() => void checkNewOrders(), 5000);
+    return () => {
+      isMounted = false;
+      window.clearInterval(timer);
+    };
+  }, [activeTab, isAdmin, handleIncomingOrder]);
+
+  useEffect(() => {
+    if (!newOrderAlert) return;
+    const timer = window.setTimeout(() => setNewOrderAlert(null), 12000);
+    return () => window.clearTimeout(timer);
+  }, [newOrderAlert]);
+
+  const isPromotions = activeTab === "Ofertas";
+  const highlightedProducts = useMemo(
+    () => products.filter((product) => product.highlighted),
+    [products],
+  );
   const visibleProducts = useMemo(
     () =>
       products.filter((product) => {
@@ -837,7 +1127,9 @@ export default function Home() {
           activeCategory === "Todos" ||
           (activeCategory === "Favoritos"
             ? favorites.includes(product.id)
-            : product.category === activeCategory);
+            : activeCategory === "Destaques"
+              ? Boolean(product.highlighted)
+              : product.category === activeCategory);
         const matchesSearch = `${product.name} ${product.description}`
           .toLocaleLowerCase("pt-BR")
           .includes(search.toLocaleLowerCase("pt-BR"));
@@ -846,6 +1138,25 @@ export default function Home() {
       }),
     [activeCategory, favorites, isPromotions, products, search],
   );
+  const adminProductCategories = useMemo(() => {
+    const catalogNames = categoriesLoaded
+      ? adminCategories.map((item) => item.name)
+      : DEFAULT_CATEGORIES;
+    return [...new Set([...adminProducts.map((item) => item.category), ...catalogNames])].sort(
+      (a, b) => a.localeCompare(b, "pt-BR"),
+    );
+  }, [adminCategories, adminProducts, categoriesLoaded]);
+  const filteredAdminProducts = useMemo(() => {
+    const query = adminProductSearch.trim().toLocaleLowerCase("pt-BR");
+    return adminProducts.filter((item) => {
+      const matchesCategory =
+        adminProductCategory === "all" || item.category === adminProductCategory;
+      const searchableText = `${item.name} ${item.description} ${item.category}`.toLocaleLowerCase(
+        "pt-BR",
+      );
+      return matchesCategory && (!query || searchableText.includes(query));
+    });
+  }, [adminProducts, adminProductCategory, adminProductSearch]);
   const cartCount = Object.values(cart).reduce((total, line) => total + line.quantity, 0);
   const filteredSales = useMemo(() => {
     const query = salesSearch.trim().toLocaleLowerCase("pt-BR");
@@ -884,33 +1195,34 @@ export default function Home() {
   const subtotal = Object.values(cart).reduce((total, line) => {
     const product = products.find((item) => item.id === line.productId);
     if (!product) return total;
-    const unitPrice = product.price + (line.specialSauce ? SPECIAL_SAUCE_PRICE_CENTS / 100 : 0);
-    return total + unitPrice * line.quantity;
+    return total + lineUnitPrice(line, product, addons) * line.quantity;
   }, 0);
   const deliveryFee = subtotal > 0 ? 5 : 0;
+  const selectedAddonsTotal = addons
+    .filter((addon) => productAddonIds.includes(addon.id))
+    .reduce((total, addon) => total + addon.price_cents / 100, 0);
+  const showsAddons = selectedProduct
+    ? ADDON_CATEGORIES.includes(selectedProduct.category)
+    : false;
 
-  function changeCartLine(
-    productId: number,
-    specialSauce: boolean,
-    note: string,
-    amount: number,
-  ) {
+  function changeCartLine(productId: number, addonIds: number[], note: string, amount: number) {
     setCart((current) => {
-      const key = makeCartKey(productId, specialSauce, note);
+      const sortedAddonIds = [...addonIds].sort((a, b) => a - b);
+      const key = makeCartKey(productId, sortedAddonIds, note);
       const next = { ...current };
       const quantity = (next[key]?.quantity ?? 0) + amount;
       if (quantity <= 0) delete next[key];
-      else next[key] = { productId, specialSauce, note: note.trim(), quantity };
+      else next[key] = { productId, addonIds: sortedAddonIds, note: note.trim(), quantity };
       return next;
     });
   }
 
   function changeQuantity(productId: number, amount: number) {
-    changeCartLine(productId, false, "", amount);
+    changeCartLine(productId, [], "", amount);
   }
 
   function openProduct(product: Product) {
-    setProductSauce(false);
+    setProductAddonIds([]);
     setProductNote("");
     setSelectedProduct(product);
   }
@@ -924,6 +1236,7 @@ export default function Home() {
   }
 
   function openAdminPanel() {
+    setNewOrderCount(0);
     setSalesError(null);
     setSalesLoading(true);
     setTodayRange(getTodayRange());
@@ -970,10 +1283,20 @@ export default function Home() {
   }
 
   function refreshSales() {
+    setNewOrderCount(0);
     setSalesError(null);
     setSalesLoading(true);
     setTodayRange(getTodayRange());
     setSalesRefresh((refresh) => refresh + 1);
+  }
+
+  function showNewOrders() {
+    setNewOrderAlert(null);
+    openAdminPanel();
+  }
+
+  async function enableNotifications() {
+    setNotificationPermission(await requestNotificationPermission());
   }
 
   const loadAdminProducts = useCallback(async () => {
@@ -1004,7 +1327,174 @@ export default function Home() {
 
   function openAdminProducts() {
     setAdminSection("products");
+    setCategoryError(null);
+    setCategoryMessage(null);
     void loadAdminProducts();
+    void loadCategories();
+  }
+
+  async function addCategory(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const name = newCategoryName.trim();
+    if (!name) {
+      setCategoryError("Informe o nome da categoria.");
+      return;
+    }
+    setCategoryError(null);
+    setCategoryMessage(null);
+    setCategorySaving(true);
+    try {
+      const token = await getAdminToken();
+      const response = await fetch("/api/admin/categories", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ name }),
+      });
+      const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+      if (!response.ok) {
+        throw new Error(payload?.error ?? "Não foi possível adicionar a categoria.");
+      }
+      setNewCategoryName("");
+      await loadCategories();
+      setCategoryMessage(`Categoria "${name}" adicionada.`);
+    } catch (error) {
+      setCategoryError(
+        error instanceof Error ? error.message : "Não foi possível adicionar a categoria.",
+      );
+    } finally {
+      setCategorySaving(false);
+    }
+  }
+
+  async function deleteCategory(item: AdminCategory) {
+    if (!window.confirm(`Excluir a categoria "${item.name}"?`)) return;
+    setCategoryError(null);
+    setCategoryMessage(null);
+    setCategorySaving(true);
+    try {
+      const token = await getAdminToken();
+      const response = await fetch(`/api/admin/categories/${item.id}`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+      if (!response.ok) {
+        throw new Error(payload?.error ?? "Não foi possível excluir a categoria.");
+      }
+      await loadCategories();
+      setCategoryMessage(`Categoria "${item.name}" excluída.`);
+    } catch (error) {
+      setCategoryError(
+        error instanceof Error ? error.message : "Não foi possível excluir a categoria.",
+      );
+    } finally {
+      setCategorySaving(false);
+    }
+  }
+
+  async function moveCategoryProducts(item: AdminCategory) {
+    const others = adminCategories
+      .filter((category) => category.id !== item.id)
+      .map((category) => category.name);
+    if (others.length === 0) {
+      setCategoryError("Cadastre outra categoria antes de mover os produtos.");
+      return;
+    }
+    const target = window.prompt(
+      `Mover os produtos de "${item.name}" para qual categoria?\n\nOpções: ${others.join(", ")}`,
+      others[0],
+    );
+    if (!target) return;
+    if (!others.includes(target)) {
+      setCategoryError("Categoria de destino inválida.");
+      return;
+    }
+
+    setCategoryError(null);
+    setCategoryMessage(null);
+    setCategorySaving(true);
+    try {
+      const token = await getAdminToken();
+      const response = await fetch(`/api/admin/categories/${item.id}`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ target }),
+      });
+      const payload = (await response.json().catch(() => null)) as
+        | { moved?: number; error?: string }
+        | null;
+      if (!response.ok) throw new Error(payload?.error ?? "Não foi possível mover os produtos.");
+      await loadAdminProducts();
+      setCategoryMessage(
+        `${payload?.moved ?? 0} produto(s) movido(s) para "${target}". Agora você pode apagar "${item.name}".`,
+      );
+    } catch (error) {
+      setCategoryError(
+        error instanceof Error ? error.message : "Não foi possível mover os produtos.",
+      );
+    } finally {
+      setCategorySaving(false);
+    }
+  }
+
+  async function addAddon(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const name = newAddonName.trim();
+    const priceCents = priceToCents(newAddonPrice);
+    if (!name) {
+      setAddonError("Informe o nome do adicional.");
+      return;
+    }
+    if (!Number.isFinite(priceCents) || priceCents <= 0) {
+      setAddonError("Informe um preço válido para o adicional.");
+      return;
+    }
+    setAddonError(null);
+    setAddonMessage(null);
+    setAddonSaving(true);
+    try {
+      const token = await getAdminToken();
+      const response = await fetch("/api/admin/addons", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ name, price_cents: priceCents }),
+      });
+      const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+      if (!response.ok) throw new Error(payload?.error ?? "Não foi possível adicionar o adicional.");
+      setNewAddonName("");
+      setNewAddonPrice("");
+      await loadAdminAddons();
+      setAddonMessage(`Adicional "${name}" adicionado.`);
+    } catch (error) {
+      setAddonError(error instanceof Error ? error.message : "Não foi possível adicionar o adicional.");
+    } finally {
+      setAddonSaving(false);
+    }
+  }
+
+  async function deleteAddon(item: AdminAddon) {
+    if (!window.confirm(`Excluir o adicional "${item.name}"?`)) return;
+    setAddonError(null);
+    setAddonMessage(null);
+    setAddonSaving(true);
+    try {
+      const token = await getAdminToken();
+      const response = await fetch(`/api/admin/addons/${item.id}`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+      if (!response.ok) throw new Error(payload?.error ?? "Não foi possível excluir o adicional.");
+      await loadAdminAddons();
+      setAddonMessage(`Adicional "${item.name}" excluído.`);
+    } catch (error) {
+      setAddonError(error instanceof Error ? error.message : "Não foi possível excluir o adicional.");
+    } finally {
+      setAddonSaving(false);
+    }
   }
 
   function startNewProduct() {
@@ -1025,6 +1515,7 @@ export default function Home() {
       oldPrice: item.old_price_cents ? (item.old_price_cents / 100).toFixed(2) : "",
       badge: item.badge ?? "",
       available: item.available,
+      highlighted: item.highlighted,
     });
     setProductError(null);
     setProductMessage(null);
@@ -1068,10 +1559,12 @@ export default function Home() {
             price_cents: priceCents,
             description: productForm.description.trim(),
             category: productForm.category,
-            image: productForm.image.trim() || DEFAULT_PRODUCT_IMAGE,
+            image:
+              productForm.image.trim() || imageForProduct(name, productForm.description),
             old_price_cents: oldPriceCents,
             badge: productForm.badge.trim() || null,
             available: productForm.available,
+            highlighted: productForm.highlighted,
           }),
         },
       );
@@ -1167,6 +1660,7 @@ export default function Home() {
           old_price_cents: item.old_price_cents,
           badge: item.badge,
           available: !item.available,
+          highlighted: item.highlighted,
         }),
       });
       const payload = (await response.json().catch(() => null)) as { error?: string } | null;
@@ -1312,7 +1806,7 @@ export default function Home() {
       const requestedItems = Object.values(cart).map((line) => ({
         id: line.productId,
         quantity: line.quantity,
-        special_sauce: line.specialSauce,
+        addon_ids: line.addonIds,
         note: line.note || null,
       }));
 
@@ -1325,7 +1819,7 @@ export default function Home() {
         body: JSON.stringify({ items: requestedItems }),
       });
       const payload = (await response.json().catch(() => null)) as
-        | { order?: SaleOrder; error?: string }
+        | { order?: SaleOrder; whatsapp?: WhatsAppNotificationResult; error?: string }
         | null;
       if (!response.ok) {
         throw new Error(payload?.error ?? "Não foi possível registrar seu pedido.");
@@ -1333,9 +1827,13 @@ export default function Home() {
       const data = payload?.order;
       if (!data) throw new Error("O Supabase não retornou o pedido criado.");
 
-      const storeUrl = getStoreWhatsAppUrl(data);
+      const whatsappSent = payload?.whatsapp === "sent";
+      setStoreWhatsAppSent(whatsappSent);
+      const storeUrl = getStoreWhatsAppUrl(data, STORE_WHATSAPP_NUMBER);
       setStoreWhatsAppUrl(storeUrl);
-      window.open(storeUrl, "_blank", "noopener,noreferrer");
+      if (!whatsappSent) {
+        window.open(storeUrl, "_blank", "noopener,noreferrer");
+      }
 
       setOrderConfirmOpen(false);
       setOrders((count) => count + 1);
@@ -1503,7 +2001,14 @@ export default function Home() {
             <button
               type="button"
               className={`nav-item${activeTab === name ? " active" : ""}`}
-              onClick={() => (name === "Pedidos" ? openOrders() : setActiveTab(name))}
+              onClick={() => {
+                if (name === "Pedidos") {
+                  openOrders();
+                } else {
+                  if (name === "Ofertas") setActiveCategory("Todos");
+                  setActiveTab(name);
+                }
+              }}
               key={name}
             >
               <span className="nav-icon-wrap">
@@ -1576,8 +2081,11 @@ export default function Home() {
                   className="promo-cta"
                   type="button"
                   onClick={() => {
-                    setActiveTab("Promoções");
+                    setActiveTab("Ofertas");
                     setActiveCategory("Todos");
+                    window.setTimeout(() => {
+                      document.getElementById("ofertas")?.scrollIntoView({ behavior: "smooth" });
+                    }, 80);
                   }}
                 >
                   Ver oferta <Icon name="arrow" size={16} />
@@ -1622,7 +2130,55 @@ export default function Home() {
             </section>
             <DeliveryLine address={deliveryAddress} onChangeAddress={openAddressEditor} />
 
-            <section className="menu-section">
+            {activeTab === "Início" && highlightedProducts.length > 0 && (
+              <section className="highlights-section" aria-labelledby="highlights-title">
+                <div className="section-heading">
+                  <div>
+                    <p className="eyebrow">ESCOLHAS DA CASA</p>
+                    <h2 id="highlights-title">Destaques</h2>
+                  </div>
+                  <button
+                    className="highlights-see-all"
+                    type="button"
+                    onClick={() => {
+                      setActiveCategory("Destaques");
+                      document.getElementById("cardapio")?.scrollIntoView({ behavior: "smooth" });
+                    }}
+                  >
+                    Ver todos <Icon name="arrow" size={14} />
+                  </button>
+                </div>
+                <div className="highlights-row">
+                  {highlightedProducts.map((product) => (
+                    <article className="highlight-card" key={product.id}>
+                      <button
+                        className="highlight-photo"
+                        type="button"
+                        onClick={() => openProduct(product)}
+                        aria-label={`Ver detalhes de ${product.name}`}
+                      >
+                        <Image src={product.image} alt="" fill unoptimized sizes="160px" />
+                        {product.badge && <span className="product-badge">{product.badge}</span>}
+                      </button>
+                      <div className="highlight-copy">
+                        <strong>{product.name}</strong>
+                        <span>{formatPrice(product.price)}</span>
+                      </div>
+                      <button
+                        className="highlight-add"
+                        type="button"
+                        onClick={() => changeQuantity(product.id, 1)}
+                        aria-label={`Adicionar ${product.name} à sacola`}
+                      >
+                        <Icon name="plus" size={16} />
+                      </button>
+                    </article>
+                  ))}
+                </div>
+              </section>
+            )}
+
+            <section className="menu-section" id={isPromotions ? "ofertas" : "cardapio"}>
               {isPromotions && (
                 <div className="section-heading">
                   <div>
@@ -1768,7 +2324,10 @@ export default function Home() {
                 target="_blank"
                 rel="noreferrer"
               >
-                <Icon name="check" size={16} /> Pedido enviado! Toque para reenviar o resumo no WhatsApp da loja
+                <Icon name="check" size={16} />{" "}
+                {storeWhatsAppSent
+                  ? "Resumo enviado ao WhatsApp da loja. Toque para reenviar."
+                  : "Pedido enviado! Toque para enviar o resumo no WhatsApp da loja"}
               </a>
             )}
             {customerOrdersError && (
@@ -1808,6 +2367,10 @@ export default function Home() {
                     <p className="customer-order-address">
                       Entrega em: {order.customer_address}
                     </p>
+                    {order.status === "preparing" && <PreparationTracker />}
+                    {order.status === "out_for_delivery" && (
+                      <DeliveryTracker address={order.customer_address} />
+                    )}
                     <div className="customer-order-fees">
                       <span>Subtotal</span>
                       <strong>{formatPrice(order.subtotal_cents / 100)}</strong>
@@ -1841,7 +2404,15 @@ export default function Home() {
                 <div className="admin-page-heading">
                   <div>
                     <p className="eyebrow">GESTÃO</p>
-                    <h1>{adminSection === "sales" ? "Vendas" : "Produtos"}</h1>
+                    <h1>
+                      {adminSection === "sales"
+                        ? "Vendas"
+                        : adminSection === "categories"
+                          ? "Categorias"
+                          : adminSection === "addons"
+                            ? "Adicionais"
+                            : "Produtos"}
+                    </h1>
                   </div>
                   <div className="admin-page-actions">
                     <button
@@ -1863,6 +2434,9 @@ export default function Home() {
                     onClick={() => setAdminSection("sales")}
                   >
                     Vendas
+                    {newOrderCount > 0 && (
+                      <span className="new-order-badge">{newOrderCount}</span>
+                    )}
                   </button>
                   <button
                     type="button"
@@ -1873,10 +2447,78 @@ export default function Home() {
                   >
                     Produtos
                   </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={adminSection === "categories"}
+                    className={adminSection === "categories" ? "active" : undefined}
+                    onClick={() => {
+                      setAdminSection("categories");
+                      setCategoryError(null);
+                      setCategoryMessage(null);
+                      void loadCategories();
+                    }}
+                  >
+                    Categorias
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={adminSection === "addons"}
+                    className={adminSection === "addons" ? "active" : undefined}
+                    onClick={() => {
+                      setAdminSection("addons");
+                      setAddonError(null);
+                      setAddonMessage(null);
+                      void loadAdminAddons();
+                    }}
+                  >
+                    Adicionais
+                  </button>
                 </div>
                 {adminSection === "sales" && (
                   <>
                     <div className="admin-sales-actions">
+                      <span
+                        className={`realtime-status${realtimeConnected ? " online" : ""}`}
+                        title={
+                          realtimeConnected
+                            ? "Acompanhando novos pedidos em tempo real"
+                            : "Conexão em tempo real indisponível"
+                        }
+                      >
+                        <span className="status-dot" /> {realtimeConnected ? "Ao vivo" : "Offline"}
+                      </span>
+                      {notificationPermission !== "granted" && notificationPermission !== "unsupported" && (
+                        <button
+                          className="admin-refresh"
+                          type="button"
+                          onClick={() => void enableNotifications()}
+                        >
+                          Ativar notificações
+                        </button>
+                      )}
+                      {notificationPermission === "granted" && (
+                        <span className="realtime-status online" title="Notificações do navegador ativadas">
+                          <span className="status-dot" /> Notificações ativas
+                        </span>
+                      )}
+                      {newOrderCount > 0 && (
+                        <button className="new-order-pill" type="button" onClick={showNewOrders}>
+                          🔔 {newOrderCount} novo{newOrderCount > 1 ? "s" : ""} pedido
+                          {newOrderCount > 1 ? "s" : ""}
+                        </button>
+                      )}
+                      <button
+                        className="admin-refresh"
+                        type="button"
+                        onClick={() => {
+                          unlockOrderAlarm();
+                          playNewOrderAlarm();
+                        }}
+                      >
+                        Testar alarme
+                      </button>
                       <button
                         className="admin-refresh"
                         type="button"
@@ -2084,7 +2726,12 @@ export default function Home() {
                           }
                         >
                           {categories
-                            .filter((category) => category !== "Todos" && category !== "Favoritos")
+                            .filter(
+                              (category) =>
+                                category !== "Todos" &&
+                                category !== "Favoritos" &&
+                                category !== "Destaques",
+                            )
                             .map((category) => (
                               <option value={category} key={category}>{category}</option>
                             ))}
@@ -2140,15 +2787,10 @@ export default function Home() {
                             )}
                           </div>
                         </div>
-                        <input
-                          type="url"
-                          className="admin-image-url"
-                          value={productForm.image}
-                          onChange={(event) =>
-                            setProductForm({ ...productForm, image: event.target.value })
-                          }
-                          placeholder="Ou cole a URL de uma imagem"
-                        />
+                        <p className="admin-image-hint">
+                          Sem imagem enviada, escolhemos automaticamente uma foto que combina com o
+                          nome e a descrição do produto.
+                        </p>
                       </div>
                       <label className="admin-product-field">
                         <span>Selo (opcional)</span>
@@ -2171,6 +2813,16 @@ export default function Home() {
                         />
                         <span>Disponível no cardápio</span>
                       </label>
+                      <label className="admin-product-check">
+                        <input
+                          type="checkbox"
+                          checked={productForm.highlighted}
+                          onChange={(event) =>
+                            setProductForm({ ...productForm, highlighted: event.target.checked })
+                          }
+                        />
+                        <span>Destacar na página inicial e no filtro &quot;Destaques&quot;</span>
+                      </label>
                       <button className="primary-button" type="submit" disabled={productSaving}>
                         {productSaving
                           ? "Salvando..."
@@ -2180,70 +2832,270 @@ export default function Home() {
                       </button>
                     </form>
 
-                    <div className="admin-product-list">
-                      <div className="admin-product-list-head">
-                        <h2>Produtos cadastrados</h2>
+                    <div className="admin-products-panel">
+                      <div className="admin-filters admin-product-filters">
+                        <label className="search-box">
+                          <Icon name="search" size={18} />
+                          <input
+                            type="search"
+                            value={adminProductSearch}
+                            onChange={(event) => setAdminProductSearch(event.target.value)}
+                            placeholder="Buscar produto por nome ou descrição"
+                            aria-label="Buscar produtos"
+                          />
+                        </label>
+                        <label className="admin-filter-status">
+                          <span>Filtrar por categoria</span>
+                          <select
+                            value={adminProductCategory}
+                            onChange={(event) => setAdminProductCategory(event.target.value)}
+                          >
+                            <option value="all">Todas as categorias</option>
+                            {adminProductCategories.map((category) => (
+                              <option value={category} key={category}>
+                                {category}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
                         <button
-                          className="admin-refresh"
+                          className="admin-refresh admin-filter-clear"
                           type="button"
-                          onClick={() => void loadAdminProducts()}
-                          disabled={productsLoading}
+                          onClick={() => {
+                            setAdminProductSearch("");
+                            setAdminProductCategory("all");
+                          }}
+                          disabled={!adminProductSearch && adminProductCategory === "all"}
                         >
-                          {productsLoading ? "Carregando..." : "Atualizar"}
+                          Limpar
                         </button>
                       </div>
-                      {productsLoading ? (
-                        <p className="auth-loading">Carregando produtos...</p>
-                      ) : adminProducts.length > 0 ? (
-                        adminProducts.map((item) => (
-                          <article
-                            className={`admin-product-card${item.available ? "" : " unavailable"}`}
-                            key={item.id}
+
+                      <div className="admin-product-list">
+                        <div className="admin-product-list-head">
+                          <h2>Produtos cadastrados</h2>
+                          <button
+                            className="admin-refresh"
+                            type="button"
+                            onClick={() => void loadAdminProducts()}
+                            disabled={productsLoading}
                           >
-                            <div className="admin-product-thumb">
-                              <Image src={item.image} alt="" fill unoptimized sizes="72px" />
-                            </div>
-                            <div className="admin-product-info">
-                              <strong>{item.name}</strong>
-                              <span>{item.category}</span>
-                              <span className="admin-product-price">
-                                {formatPrice(item.price_cents / 100)}
-                                {item.old_price_cents && (
-                                  <s>{formatPrice(item.old_price_cents / 100)}</s>
+                            {productsLoading ? "Carregando..." : "Atualizar"}
+                          </button>
+                        </div>
+                        {productsLoading ? (
+                          <p className="auth-loading">Carregando produtos...</p>
+                        ) : filteredAdminProducts.length > 0 ? (
+                          filteredAdminProducts.map((item) => (
+                            <article
+                              className={`admin-product-card${item.available ? "" : " unavailable"}`}
+                              key={item.id}
+                            >
+                              <div className="admin-product-thumb">
+                                <Image src={item.image} alt="" fill unoptimized sizes="72px" />
+                              </div>
+                              <div className="admin-product-info">
+                                <strong>{item.name}</strong>
+                                <span>{item.category}</span>
+                                <span className="admin-product-price">
+                                  {formatPrice(item.price_cents / 100)}
+                                  {item.old_price_cents && (
+                                    <s>{formatPrice(item.old_price_cents / 100)}</s>
+                                  )}
+                                </span>
+                                {item.highlighted && (
+                                  <span className="admin-product-highlight">Destaque</span>
                                 )}
-                              </span>
-                              {!item.available && <span className="admin-product-hidden">Oculto</span>}
+                                {!item.available && (
+                                  <span className="admin-product-hidden">Oculto</span>
+                                )}
+                              </div>
+                              <div className="admin-product-actions">
+                                <button
+                                  type="button"
+                                  onClick={() => void toggleProductAvailable(item)}
+                                  disabled={productSaving}
+                                >
+                                  {item.available ? "Desativar" : "Ativar"}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => startEditProduct(item)}
+                                  disabled={productSaving}
+                                >
+                                  Editar
+                                </button>
+                                <button
+                                  type="button"
+                                  className="danger"
+                                  onClick={() => void deleteProduct(item.id)}
+                                  disabled={productSaving}
+                                >
+                                  Excluir
+                                </button>
+                              </div>
+                            </article>
+                          ))
+                        ) : (
+                          <div className="empty-state admin-empty-state">
+                            <h2>
+                              {adminProducts.length > 0
+                                ? "Nenhum produto encontrado"
+                                : "Nenhum produto cadastrado"}
+                            </h2>
+                            <p>
+                              {adminProducts.length > 0
+                                ? "Ajuste a busca ou o filtro de categoria."
+                                : "Use o formulário ao lado para adicionar o primeiro produto."}
+                            </p>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {adminSection === "categories" && (
+                  <div className="admin-manager-layout">
+                    <form className="admin-product-form" onSubmit={addCategory} aria-busy={categorySaving}>
+                      <div className="admin-product-form-head">
+                        <h2>Adicionar categoria</h2>
+                      </div>
+                      {categoryError && (
+                        <p className="auth-feedback error" role="alert">{categoryError}</p>
+                      )}
+                      {categoryMessage && (
+                        <p className="auth-feedback success" role="status">{categoryMessage}</p>
+                      )}
+                      <label className="admin-product-field">
+                        <span>Nome da categoria</span>
+                        <input
+                          type="text"
+                          required
+                          maxLength={40}
+                          value={newCategoryName}
+                          onChange={(event) => setNewCategoryName(event.target.value)}
+                          placeholder="Ex.: Sobremesas"
+                        />
+                      </label>
+                      <button className="primary-button" type="submit" disabled={categorySaving}>
+                        {categorySaving ? "Adicionando..." : "Adicionar categoria"}
+                      </button>
+                      <p className="admin-image-hint">
+                        Para apagar uma categoria, primeiro mova os produtos dela para outra categoria.
+                      </p>
+                    </form>
+                    <div className="admin-product-list">
+                      <div className="admin-product-list-head">
+                        <h2>Categorias cadastradas</h2>
+                        <button className="admin-refresh" type="button" onClick={() => void loadCategories()}>
+                          Atualizar
+                        </button>
+                      </div>
+                      {!categoriesLoaded ? (
+                        <p className="auth-loading">Carregando categorias...</p>
+                      ) : adminCategories.length > 0 ? (
+                        <div className="admin-manager-list">
+                          {adminCategories.map((item) => (
+                            <div className="admin-manager-row" key={item.id}>
+                              <span>{item.name}</span>
+                              <div className="admin-manager-actions">
+                                <button
+                                  type="button"
+                                  disabled={categorySaving}
+                                  onClick={() => void moveCategoryProducts(item)}
+                                >
+                                  Mover produtos
+                                </button>
+                                <button
+                                  type="button"
+                                  className="danger"
+                                  disabled={categorySaving}
+                                  onClick={() => void deleteCategory(item)}
+                                >
+                                  Apagar
+                                </button>
+                              </div>
                             </div>
-                            <div className="admin-product-actions">
-                              <button
-                                type="button"
-                                onClick={() => void toggleProductAvailable(item)}
-                                disabled={productSaving}
-                              >
-                                {item.available ? "Desativar" : "Ativar"}
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => startEditProduct(item)}
-                                disabled={productSaving}
-                              >
-                                Editar
-                              </button>
+                          ))}
+                        </div>
+                      ) : (
+                        <div className="empty-state admin-empty-state">
+                          <h2>Nenhuma categoria</h2>
+                          <p>Adicione uma categoria para organizar o cardápio.</p>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {adminSection === "addons" && (
+                  <div className="admin-manager-layout">
+                    <form className="admin-product-form" onSubmit={addAddon} aria-busy={addonSaving}>
+                      <div className="admin-product-form-head">
+                        <h2>Adicionar adicional</h2>
+                      </div>
+                      {addonError && <p className="auth-feedback error" role="alert">{addonError}</p>}
+                      {addonMessage && <p className="auth-feedback success" role="status">{addonMessage}</p>}
+                      <label className="admin-product-field">
+                        <span>Nome do adicional</span>
+                        <input
+                          type="text"
+                          required
+                          maxLength={40}
+                          value={newAddonName}
+                          onChange={(event) => setNewAddonName(event.target.value)}
+                          placeholder="Ex.: Bacon crocante"
+                        />
+                      </label>
+                      <label className="admin-product-field">
+                        <span>Preço (R$)</span>
+                        <input
+                          type="number"
+                          min="0.01"
+                          step="0.01"
+                          required
+                          value={newAddonPrice}
+                          onChange={(event) => setNewAddonPrice(event.target.value)}
+                          placeholder="5,00"
+                        />
+                      </label>
+                      <button className="primary-button" type="submit" disabled={addonSaving}>
+                        {addonSaving ? "Adicionando..." : "Adicionar adicional"}
+                      </button>
+                      <p className="admin-image-hint">
+                        Os adicionais aparecem para hambúrgueres e hot dogs no momento do pedido.
+                      </p>
+                    </form>
+                    <div className="admin-product-list">
+                      <div className="admin-product-list-head">
+                        <h2>Adicionais cadastrados</h2>
+                        <button className="admin-refresh" type="button" onClick={() => void loadAdminAddons()}>
+                          Atualizar
+                        </button>
+                      </div>
+                      {adminAddons.length > 0 ? (
+                        <div className="admin-manager-list">
+                          {adminAddons.map((item) => (
+                            <div className="admin-manager-row" key={item.id}>
+                              <span>
+                                {item.name} <small>{formatPrice(item.price_cents / 100)}</small>
+                              </span>
                               <button
                                 type="button"
                                 className="danger"
-                                onClick={() => void deleteProduct(item.id)}
-                                disabled={productSaving}
+                                disabled={addonSaving}
+                                onClick={() => void deleteAddon(item)}
                               >
-                                Excluir
+                                Apagar
                               </button>
                             </div>
-                          </article>
-                        ))
+                          ))}
+                        </div>
                       ) : (
                         <div className="empty-state admin-empty-state">
-                          <h2>Nenhum produto cadastrado</h2>
-                          <p>Use o formulário ao lado para adicionar o primeiro produto.</p>
+                          <h2>Nenhum adicional</h2>
+                          <p>Cadastre adicionais para usar nos hambúrgueres e hot dogs.</p>
                         </div>
                       )}
                     </div>
@@ -2584,27 +3436,34 @@ export default function Home() {
               <h2 id="product-detail-title">{selectedProduct.name}</h2>
               <p>{selectedProduct.description}</p>
               <div className="product-detail-price">
-                <strong>
-                  {formatPrice(
-                    selectedProduct.price +
-                      (productSauce ? SPECIAL_SAUCE_PRICE_CENTS / 100 : 0),
-                  )}
-                </strong>
-                {selectedProduct.oldPrice && !productSauce && (
+                <strong>{formatPrice(selectedProduct.price + selectedAddonsTotal)}</strong>
+                {selectedProduct.oldPrice && productAddonIds.length === 0 && (
                   <del>{formatPrice(selectedProduct.oldPrice)}</del>
                 )}
               </div>
               <div className="product-options">
-                <p className="product-options-title">Deseja adicionais?</p>
-                <label className="product-option">
-                  <input
-                    type="checkbox"
-                    checked={productSauce}
-                    onChange={(event) => setProductSauce(event.target.checked)}
-                  />
-                  <span>Molho especial</span>
-                  <strong>+ {formatPrice(SPECIAL_SAUCE_PRICE_CENTS / 100)}</strong>
-                </label>
+                {showsAddons && addons.length > 0 && (
+                  <>
+                    <p className="product-options-title">Escolha seus adicionais</p>
+                    {addons.map((addon) => (
+                      <label className="product-option" key={addon.id}>
+                        <input
+                          type="checkbox"
+                          checked={productAddonIds.includes(addon.id)}
+                          onChange={(event) =>
+                            setProductAddonIds((current) =>
+                              event.target.checked
+                                ? [...current, addon.id]
+                                : current.filter((id) => id !== addon.id),
+                            )
+                          }
+                        />
+                        <span>{addon.name}</span>
+                        <strong>+ {formatPrice(addon.price_cents / 100)}</strong>
+                      </label>
+                    ))}
+                  </>
+                )}
                 <label className="product-note-field">
                   <span>Alguma observação?</span>
                   <textarea
@@ -2620,7 +3479,7 @@ export default function Home() {
                 className="primary-button"
                 type="button"
                 onClick={() => {
-                  changeCartLine(selectedProduct.id, productSauce, productNote, 1);
+                  changeCartLine(selectedProduct.id, productAddonIds, productNote, 1);
                   setSelectedProduct(null);
                 }}
               >
@@ -2662,12 +3521,11 @@ export default function Home() {
               {Object.values(cart).map((line) => {
                 const product = products.find((item) => item.id === line.productId);
                 if (!product) return null;
-                const unitPrice =
-                  product.price + (line.specialSauce ? SPECIAL_SAUCE_PRICE_CENTS / 100 : 0);
+                const unitPrice = lineUnitPrice(line, product, addons);
                 return (
                   <div
                     className="cart-item"
-                    key={makeCartKey(line.productId, line.specialSauce, line.note)}
+                    key={makeCartKey(line.productId, line.addonIds, line.note)}
                   >
                     <div className="cart-thumbnail">
                       <Image src={product.image} alt="" fill unoptimized sizes="64px" />
@@ -2675,7 +3533,11 @@ export default function Home() {
                     <div className="cart-item-copy">
                       <strong>{product.name}</strong>
                       <span>{formatPrice(unitPrice)}</span>
-                      {line.specialSauce && <small className="cart-item-addon">+ Molho especial</small>}
+                      {lineAddons(line, addons).length > 0 && (
+                        <small className="cart-item-addon">
+                          + {lineAddons(line, addons).map((addon) => addon.name).join(", ")}
+                        </small>
+                      )}
                       {line.note && <small className="cart-item-note">Obs.: {line.note}</small>}
                     </div>
                     <div className="cart-quantity">
@@ -2741,12 +3603,11 @@ export default function Home() {
               {Object.values(cart).map((line) => {
                 const product = products.find((item) => item.id === line.productId);
                 if (!product) return null;
-                const unitPrice =
-                  product.price + (line.specialSauce ? SPECIAL_SAUCE_PRICE_CENTS / 100 : 0);
+                const unitPrice = lineUnitPrice(line, product, addons);
                 return (
                   <div
                     className="cart-item"
-                    key={makeCartKey(line.productId, line.specialSauce, line.note)}
+                    key={makeCartKey(line.productId, line.addonIds, line.note)}
                   >
                     <div className="cart-thumbnail">
                       <Image src={product.image} alt="" fill unoptimized sizes="64px" />
@@ -2754,13 +3615,17 @@ export default function Home() {
                     <div className="cart-item-copy">
                       <strong>{product.name}</strong>
                       <span>{formatPrice(unitPrice)}</span>
-                      {line.specialSauce && <small className="cart-item-addon">+ Molho especial</small>}
+                      {lineAddons(line, addons).length > 0 && (
+                        <small className="cart-item-addon">
+                          + {lineAddons(line, addons).map((addon) => addon.name).join(", ")}
+                        </small>
+                      )}
                       {line.note && <small className="cart-item-note">Obs.: {line.note}</small>}
                     </div>
                     <div className="cart-quantity">
                       <button
                         type="button"
-                        onClick={() => changeCartLine(line.productId, line.specialSauce, line.note, -1)}
+                        onClick={() => changeCartLine(line.productId, line.addonIds, line.note, -1)}
                         aria-label={`Diminuir quantidade de ${product.name}`}
                       >
                         <Icon name="minus" size={14} />
@@ -2768,7 +3633,7 @@ export default function Home() {
                       <span>{line.quantity}</span>
                       <button
                         type="button"
-                        onClick={() => changeCartLine(line.productId, line.specialSauce, line.note, 1)}
+                        onClick={() => changeCartLine(line.productId, line.addonIds, line.note, 1)}
                         aria-label={`Aumentar quantidade de ${product.name}`}
                       >
                         <Icon name="plus" size={14} />
@@ -2802,6 +3667,30 @@ export default function Home() {
         </div>
       )}
 
+      {newOrderAlert && isAdmin && (
+        <div className="new-order-toast" role="status" aria-live="polite">
+          <span className="new-order-toast-icon"><Icon name="receipt" size={20} /></span>
+          <div className="new-order-toast-copy">
+            <strong>Novo pedido #{String(newOrderAlert.id).padStart(4, "0")}</strong>
+            <span>
+              {newOrderAlert.customer_name || newOrderAlert.customer_email} ·{" "}
+              {formatPrice(newOrderAlert.total_cents / 100)}
+            </span>
+          </div>
+          <button className="new-order-toast-view" type="button" onClick={showNewOrders}>
+            Ver
+          </button>
+          <button
+            className="new-order-toast-close"
+            type="button"
+            onClick={() => setNewOrderAlert(null)}
+            aria-label="Fechar aviso de novo pedido"
+          >
+            <Icon name="close" size={16} />
+          </button>
+        </div>
+      )}
+
       <footer className="site-footer">
         <span>Brasa &amp; Pão · Cardápio digital</span>
         <button
@@ -2812,6 +3701,7 @@ export default function Home() {
         </button>
       </footer>
       <CookieConsent />
+      <MetaPixel />
     </div>
   );
 }

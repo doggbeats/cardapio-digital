@@ -6,11 +6,18 @@ export type OrderStatus =
   | "delivered"
   | "cancelled";
 
+export type OrderAddon = {
+  id: number;
+  name: string;
+  price_cents: number;
+};
+
 export type OrderItem = {
   id: number;
   name: string;
   quantity: number;
   unit_price_cents: number;
+  addons?: OrderAddon[];
   special_sauce?: boolean;
   note?: string | null;
 };
@@ -52,6 +59,7 @@ export type Database = {
           image: string;
           old_price_cents: number | null;
           badge: string | null;
+          highlighted: boolean;
         };
         Insert: {
           id: number;
@@ -63,6 +71,7 @@ export type Database = {
           image?: string;
           old_price_cents?: number | null;
           badge?: string | null;
+          highlighted?: boolean;
         };
         Update: {
           id?: number;
@@ -74,6 +83,45 @@ export type Database = {
           image?: string;
           old_price_cents?: number | null;
           badge?: string | null;
+          highlighted?: boolean;
+        };
+        Relationships: [];
+      };
+      product_addons: {
+        Row: {
+          id: number;
+          name: string;
+          price_cents: number;
+          available: boolean;
+          created_at: string;
+        };
+        Insert: {
+          id?: number;
+          name: string;
+          price_cents: number;
+          available?: boolean;
+          created_at?: string;
+        };
+        Update: {
+          name?: string;
+          price_cents?: number;
+          available?: boolean;
+        };
+        Relationships: [];
+      };
+      product_categories: {
+        Row: {
+          id: number;
+          name: string;
+          created_at: string;
+        };
+        Insert: {
+          id?: number;
+          name: string;
+          created_at?: string;
+        };
+        Update: {
+          name?: string;
         };
         Relationships: [];
       };

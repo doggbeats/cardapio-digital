@@ -50,7 +50,7 @@ where id = 3;
 update public.menu_catalog set
   description = 'Limão-taiti, toque de siciliano e hortelã fresca.',
   category = 'Bebidas',
-  image = 'https://images.pexels.com/photos/410648/pexels-photo-410648.jpeg?auto=compress&cs=tinysrgb&w=800',
+  image = 'https://images.unsplash.com/photo-1513558161293-cdaf765ed2fd?auto=format&fit=crop&w=800&q=85',
   old_price_cents = null,
   badge = null
 where id = 4;
@@ -146,7 +146,7 @@ where id = 15;
 update public.menu_catalog set
   description = 'Soda italiana refrescante com frutas vermelhas.',
   category = 'Bebidas',
-  image = 'https://images.pexels.com/photos/376464/pexels-photo-376464.jpeg?auto=compress&cs=tinysrgb&w=800',
+  image = 'https://images.unsplash.com/photo-1544145945-f90425340c7e?auto=format&fit=crop&w=800&q=85',
   old_price_cents = null,
   badge = null
 where id = 16;

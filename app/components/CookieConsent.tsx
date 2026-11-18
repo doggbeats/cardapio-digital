@@ -12,8 +12,9 @@ type Consent = {
 const COOKIE_NAME = "cardapio_cookie_consent";
 const COOKIE_MAX_AGE = 60 * 60 * 24 * 180;
 const OPEN_EVENT = "cardapio:open-cookie-settings";
+export const CONSENT_CHANGE_EVENT = "cardapio:consent-change";
 
-function readConsent(): Consent | null {
+export function readConsent(): Consent | null {
   const match = document.cookie
     .split(";")
     .map((part) => part.trim())
@@ -93,6 +94,7 @@ export default function CookieConsent() {
     saveConsent(nextAnalytics, nextMarketing);
     setAnalytics(nextAnalytics);
     setMarketing(nextMarketing);
+    window.dispatchEvent(new Event(CONSENT_CHANGE_EVENT));
     setOpen(false);
     setCustomizing(false);
     setDetails(false);
