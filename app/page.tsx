@@ -2528,54 +2528,58 @@ export default function Home() {
                 {adminSection === "sales" && (
                   <>
                     <div className="admin-sales-actions">
-                      <span
-                        className={`realtime-status${realtimeConnected ? " online" : ""}`}
-                        title={
-                          realtimeConnected
-                            ? "Acompanhando novos pedidos em tempo real"
-                            : "Conexão em tempo real indisponível"
-                        }
-                      >
-                        <span className="status-dot" /> {realtimeConnected ? "Ao vivo" : "Offline"}
-                      </span>
-                      {notificationPermission !== "granted" && notificationPermission !== "unsupported" && (
+                      <div className="admin-sales-statuses">
+                        <span
+                          className={`realtime-status${realtimeConnected ? " online" : ""}`}
+                          title={
+                            realtimeConnected
+                              ? "Acompanhando novos pedidos em tempo real"
+                              : "Conexão em tempo real indisponível"
+                          }
+                        >
+                          <span className="status-dot" /> {realtimeConnected ? "Ao vivo" : "Offline"}
+                        </span>
+                        {notificationPermission === "granted" && (
+                          <span className="realtime-status online" title="Notificações do navegador ativadas">
+                            <span className="status-dot" /> Notificações ativas
+                          </span>
+                        )}
+                      </div>
+                      <div className="admin-sales-buttons">
+                        {notificationPermission !== "granted" && notificationPermission !== "unsupported" && (
+                          <button
+                            className="admin-refresh"
+                            type="button"
+                            onClick={() => void enableNotifications()}
+                          >
+                            Ativar notificações
+                          </button>
+                        )}
+                        {newOrderCount > 0 && (
+                          <button className="new-order-pill" type="button" onClick={showNewOrders}>
+                            🔔 {newOrderCount} novo{newOrderCount > 1 ? "s" : ""} pedido
+                            {newOrderCount > 1 ? "s" : ""}
+                          </button>
+                        )}
                         <button
                           className="admin-refresh"
                           type="button"
-                          onClick={() => void enableNotifications()}
+                          onClick={() => {
+                            unlockOrderAlarm();
+                            playNewOrderAlarm();
+                          }}
                         >
-                          Ativar notificações
+                          Testar alarme
                         </button>
-                      )}
-                      {notificationPermission === "granted" && (
-                        <span className="realtime-status online" title="Notificações do navegador ativadas">
-                          <span className="status-dot" /> Notificações ativas
-                        </span>
-                      )}
-                      {newOrderCount > 0 && (
-                        <button className="new-order-pill" type="button" onClick={showNewOrders}>
-                          🔔 {newOrderCount} novo{newOrderCount > 1 ? "s" : ""} pedido
-                          {newOrderCount > 1 ? "s" : ""}
+                        <button
+                          className="admin-refresh"
+                          type="button"
+                          onClick={refreshSales}
+                          disabled={salesLoading}
+                        >
+                          {salesLoading ? "Atualizando..." : "Atualizar vendas"}
                         </button>
-                      )}
-                      <button
-                        className="admin-refresh"
-                        type="button"
-                        onClick={() => {
-                          unlockOrderAlarm();
-                          playNewOrderAlarm();
-                        }}
-                      >
-                        Testar alarme
-                      </button>
-                      <button
-                        className="admin-refresh"
-                        type="button"
-                        onClick={refreshSales}
-                        disabled={salesLoading}
-                      >
-                        {salesLoading ? "Atualizando..." : "Atualizar vendas"}
-                      </button>
+                      </div>
                     </div>
                     {salesError && <p className="auth-feedback error" role="alert">{salesError}</p>}
                 <div className="admin-metrics">

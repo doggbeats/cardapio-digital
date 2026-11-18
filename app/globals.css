@@ -1406,9 +1406,26 @@ input:focus-visible {
 .admin-sales-actions {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
-  gap: 8px;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
   margin-bottom: 12px;
+}
+
+.admin-sales-statuses,
+.admin-sales-buttons {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.admin-sales-statuses {
+  margin-right: auto;
+}
+
+.admin-sales-buttons {
+  justify-content: flex-end;
 }
 
 .new-order-badge {
@@ -1428,10 +1445,10 @@ input:focus-visible {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  margin-right: auto;
   color: var(--secondary);
   font-size: 10px;
   font-weight: 650;
+  white-space: nowrap;
 }
 
 .realtime-status .status-dot {
@@ -2915,6 +2932,33 @@ input:focus-visible {
 
   .admin-page-heading {
     align-items: center;
+  }
+
+  .admin-sales-actions {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+  }
+
+  .admin-sales-statuses,
+  .admin-sales-buttons {
+    width: 100%;
+    margin-right: 0;
+  }
+
+  .admin-sales-buttons {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .admin-sales-buttons .admin-refresh,
+  .admin-sales-buttons .new-order-pill {
+    width: 100%;
+    white-space: nowrap;
+  }
+
+  .admin-sales-buttons > :last-child:nth-child(odd) {
+    grid-column: 1 / -1;
   }
 
   .admin-metrics {
